@@ -52,3 +52,7 @@ Thumbs.db
 
 # CSV backups or exports (keep real data files tracked by default)
 *.csv~
+
+# App artifacts
+picture/
+window_state.json
