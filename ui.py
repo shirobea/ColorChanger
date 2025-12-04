@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import cv2
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import ttk, filedialog, messagebox
@@ -25,10 +26,11 @@ class ConversionRequest:
     num_colors: int
     mode: str
     quantize_method: str
+    division_method: str
     keep_aspect: bool
     pipeline: str
-    use_saliency: bool
-    saliency_strength: float
+    contour_enhance: bool
+    adaptive_weight: float
 
 
 class BeadsApp:
@@ -57,6 +59,10 @@ class BeadsApp:
         self.diff_var = tk.StringVar(value="")
         self.input_pil: Optional[Image.Image] = None
         self.output_pil: Optional[Image.Image] = None
+        self.saliency_map: Optional[np.ndarray] = None  # サリエンシーマップ（変換処理向け）
+        self.importance_map: Optional[np.ndarray] = None  # 顔強調込みの重要度マップ（表示・適応ブロック用）
+        self.saliency_overlay_pil: Optional[Image.Image] = None  # 重要度マップをカラー化したプレビュー
+        self._show_saliency: bool = False
         self.original_size: Optional[tuple[int, int]] = None
         self.cancel_event: Optional[threading.Event] = None
         self.worker_thread: Optional[threading.Thread] = None
@@ -67,13 +73,12 @@ class BeadsApp:
         self.width_var = tk.StringVar(value="")
         self.height_var = tk.StringVar(value="")
         self.lock_aspect_var = tk.BooleanVar(value=True)
-        self.use_saliency_var = tk.BooleanVar(value=True)
-        self.saliency_strength_var = tk.DoubleVar(value=0.9)
-        self.saliency_strength_display = tk.StringVar(value="0.90")
+        self.contour_enhance_var = tk.BooleanVar(value=True)
+        self.adaptive_weight_var = tk.DoubleVar(value=50.0)
+        self.adaptive_weight_display = tk.StringVar(value="50")
         self.quantize_method_var = tk.StringVar(value="Wu減色")
+        self.division_method_var = tk.StringVar(value="なし")
         self._updating_size_fields = False
-        self._saliency_min = 0.01
-        self._saliency_max = 3.0
 
         self._build_layout()
 
@@ -143,21 +148,66 @@ class BeadsApp:
 
         ttk.Label(control_frame, text="減色後の色数").grid(row=3, column=1, padx=5, pady=5, sticky="e")
         self.num_colors_var = tk.StringVar(value="64")
-        ttk.Spinbox(control_frame, from_=2, to=256, textvariable=self.num_colors_var, width=8).grid(
-            row=3, column=2, padx=5, pady=5, sticky="w"
-        )
+        num_spin = ttk.Spinbox(control_frame, from_=2, to=256, textvariable=self.num_colors_var, width=8)
+        num_spin.grid(row=3, column=2, padx=5, pady=5, sticky="w")
+        self.num_colors_spin = num_spin
 
         ttk.Label(control_frame, text="減色方式").grid(row=4, column=1, padx=5, pady=5, sticky="e")
         quantize_box = ttk.Combobox(
             control_frame,
             textvariable=self.quantize_method_var,
-            values=["K-means", "Wu減色", "ブロック減色"],
+            values=["なし", "K-means", "Wu減色"],
             state="readonly",
             width=18,
         )
         quantize_box.grid(row=4, column=2, padx=5, pady=5, sticky="w")
+        quantize_box.bind(
+            "<<ComboboxSelected>>",
+            lambda *_: (
+                self._update_num_colors_state(),
+                self._update_pipeline_controls(),
+            ),
+        )
+        self.quantize_box = quantize_box
 
-        ttk.Label(control_frame, text="処理順序").grid(row=5, column=1, padx=5, pady=5, sticky="e")
+        ttk.Label(control_frame, text="分割方式").grid(row=5, column=1, padx=5, pady=5, sticky="e")
+        division_box = ttk.Combobox(
+            control_frame,
+            textvariable=self.division_method_var,
+            values=["なし", "ブロック分割", "適応型ブロック分割"],
+            state="readonly",
+            width=18,
+        )
+        division_box.grid(row=5, column=2, padx=5, pady=5, sticky="w")
+        division_box.bind(
+            "<<ComboboxSelected>>",
+            lambda *_: (
+                self._update_adaptive_controls(),
+                self._update_pipeline_controls(),
+            ),
+        )
+        self.division_box = division_box
+
+        self.adaptive_label = ttk.Label(control_frame, text="細かさ（顔まわり）")
+        self.adaptive_label.grid(row=6, column=1, padx=5, pady=5, sticky="e")
+        adaptive_scale = ttk.Scale(
+            control_frame,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self.adaptive_weight_var,
+            command=lambda *_: self._on_adaptive_weight_change(),
+            length=140,
+        )
+        adaptive_scale.grid(row=6, column=2, padx=5, pady=5, sticky="we")
+        adaptive_scale.bind("<Button-1>", self._on_adaptive_pointer)
+        adaptive_scale.bind("<B1-Motion>", self._on_adaptive_pointer)
+        self.adaptive_scale = adaptive_scale
+        ttk.Label(control_frame, textvariable=self.adaptive_weight_display, width=5).grid(
+            row=6, column=3, padx=2, pady=5, sticky="w"
+        )
+
+        ttk.Label(control_frame, text="処理順序").grid(row=7, column=1, padx=5, pady=5, sticky="e")
         self.pipeline_var = tk.StringVar(value="リサイズ→減色")
         pipeline_box = ttk.Combobox(
             control_frame,
@@ -166,45 +216,41 @@ class BeadsApp:
             state="readonly",
             width=18,
         )
-        pipeline_box.grid(row=5, column=2, padx=5, pady=5, sticky="w")
+        pipeline_box.grid(row=7, column=2, padx=5, pady=5, sticky="w")
+        self.pipeline_box = pipeline_box
 
         ttk.Checkbutton(
             control_frame,
-            text="顔パーツ優先（サリエンシー）",
-            variable=self.use_saliency_var,
-        ).grid(row=6, column=0, padx=5, pady=5, sticky="w", columnspan=2)
-
-        ttk.Label(control_frame, text="サリエンシー強度").grid(row=7, column=0, padx=5, pady=5, sticky="e")
-        strength_scale = ttk.Scale(
-            control_frame,
-            from_=self._saliency_min,
-            to=self._saliency_max,
-            orient="horizontal",
-            variable=self.saliency_strength_var,
-            command=lambda *_: self._on_saliency_strength_change(),
-            length=140,
-        )
-        strength_scale.grid(row=7, column=1, padx=5, pady=5, sticky="we")
-        strength_scale.bind("<Button-1>", self._on_saliency_pointer)
-        strength_scale.bind("<B1-Motion>", self._on_saliency_pointer)
-        self.saliency_scale = strength_scale
-        ttk.Label(control_frame, textvariable=self.saliency_strength_display, width=5).grid(
-            row=7, column=2, padx=2, pady=5, sticky="w"
-        )
+            text="輪郭線強調（サリエンシー利用）",
+            variable=self.contour_enhance_var,
+        ).grid(row=8, column=0, padx=5, pady=5, sticky="w", columnspan=3)
 
         self.convert_button = ttk.Button(control_frame, text="変換実行", command=self.start_conversion)
         self.convert_button.grid(row=0, column=3, padx=10, pady=5, sticky="w")
 
         self.progress_label = ttk.Label(control_frame, text="進捗: 0% (経過 0.0s)")
-        self.progress_label.grid(row=6, column=3, padx=5, pady=5, sticky="w")
+        self.progress_label.grid(row=8, column=3, padx=5, pady=5, sticky="w")
         self.progress_bar = ttk.Progressbar(control_frame, length=160)
-        self.progress_bar.grid(row=7, column=3, padx=5, pady=5, sticky="w")
+        self.progress_bar.grid(row=9, column=3, padx=5, pady=5, sticky="w")
 
         self.save_button = ttk.Button(control_frame, text="出力画像を保存", command=self.save_image, state="disabled")
-        self.save_button.grid(row=8, column=3, padx=5, pady=5, sticky="w")
+        self.save_button.grid(row=10, column=3, padx=5, pady=5, sticky="w")
+        # 初期状態では適応ブロック用スライダーを無効化
+        self._update_adaptive_controls()
+        # 処理順序コンボも方式に応じて有効・無効を切替
+        self._update_pipeline_controls()
+        # 減色方式に応じて色数フィールドの有効/無効を初期反映
+        self._update_num_colors_state()
 
     def _build_preview_panel(self, preview_frame: ttk.Frame) -> None:
         """右側のプレビュー領域を組み立てる。"""
+        self.saliency_toggle_button = ttk.Button(
+            preview_frame,
+            text="画像切り替え（通常）",
+            command=self.toggle_saliency_view,
+        )
+        self.saliency_toggle_button.grid(row=0, column=0, padx=5, pady=(0, 4), sticky="nw")
+
         self.diff_label = ttk.Label(
             preview_frame,
             textvariable=self.diff_var,
@@ -226,6 +272,7 @@ class BeadsApp:
         self.output_canvas.bind("<Leave>", self._on_output_release)
 
         self.preview_frame.bind("<Configure>", self._on_preview_resize)
+        self._set_saliency_button_state(enabled=False)
 
     def _finalize_window_layout(self) -> None:
         """ウィンドウ設定の後処理をまとめる。"""
@@ -259,10 +306,87 @@ class BeadsApp:
         self.output_pil = None
         self.output_image = None
         self._output_photo = None
+        self.saliency_map = None
+        self.importance_map = None
+        self.saliency_overlay_pil = None
+        self._show_saliency = False
+        self._set_saliency_button_state(enabled=False)
         self.original_size = image.size
         self.output_canvas.configure(image="", text="変換後")
         self._set_initial_target_size(image)
+        self._compute_and_store_importance(image)
         self._refresh_previews()
+
+    def _compute_and_store_importance(self, image: Image.Image) -> None:
+        """入力画像読込直後にサリエンシー＋顔重みを統合した重要度マップを計算し、オーバーレイを作る。"""
+        self.status_var.set("重要度マップを生成中...")
+        pil_for_sal = image
+        max_side = 720
+        if max(image.size) > max_side:
+            # 計算負荷を抑えるために長辺を720pxに収めて計算
+            pil_for_sal = image.copy()
+            pil_for_sal.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        np_img = np.array(pil_for_sal, dtype=np.uint8)
+        try:
+            saliency_small = converter.compute_saliency_map(np_img)
+            importance_small = converter.compute_importance_map(
+                np_img, saliency_map=saliency_small, eye_importance_scale=0.8
+            )
+        except Exception as exc:
+            self.status_var.set(f"重要度マップ生成に失敗しました: {exc}")
+            self.saliency_map = None
+            self.importance_map = None
+            self.saliency_overlay_pil = None
+            self._set_saliency_button_state(enabled=False)
+            return
+
+        saliency_full = cv2.resize(saliency_small, image.size, interpolation=cv2.INTER_LINEAR)
+        saliency_full = np.clip(saliency_full.astype(np.float32), 0.0, 1.0)
+        self.saliency_map = saliency_full
+        importance_full = cv2.resize(importance_small, image.size, interpolation=cv2.INTER_LINEAR)
+        importance_full = np.clip(importance_full.astype(np.float32), 0.0, 1.0)
+        self.importance_map = importance_full
+        self.saliency_overlay_pil = self._build_saliency_overlay(image, importance_full)
+        self._set_saliency_button_state(enabled=True)
+        self.status_var.set("重要度マップを生成しました。")
+
+    def toggle_saliency_view(self) -> None:
+        """入力プレビューを重要度オーバーレイと通常画像で切り替える。"""
+        if self.saliency_overlay_pil is None:
+            if self.input_pil is None:
+                self.status_var.set("先に入力画像を選択してください。")
+            else:
+                self.status_var.set("重要度マップの準備ができていません。")
+            return
+        self._show_saliency = not self._show_saliency
+        self._update_saliency_button_label()
+        self._refresh_previews()
+
+    def _set_saliency_button_state(self, enabled: bool) -> None:
+        """サリエンシートグルボタンの状態とラベルをまとめて切り替える。"""
+        if hasattr(self, "saliency_toggle_button"):
+            state = "normal" if enabled else "disabled"
+            self.saliency_toggle_button.configure(state=state)
+        self._update_saliency_button_label()
+
+    def _update_saliency_button_label(self) -> None:
+        """現在の表示状態に応じてボタンラベルを更新する。"""
+        if hasattr(self, "saliency_toggle_button"):
+            label = "画像切り替え（重要度表示）" if self._show_saliency else "画像切り替え（通常）"
+            self.saliency_toggle_button.configure(text=label)
+
+    def _build_saliency_overlay(self, base_image: Image.Image, saliency_map: np.ndarray, alpha: float = 0.55) -> Image.Image:
+        """重要度マップにカラーマップを適用して元画像へ重ねる。"""
+        sal = np.clip(saliency_map.astype(np.float32), 0.0, 1.0)
+        base_rgb = np.array(base_image.convert("RGB"), dtype=np.uint8)
+        h, w = base_rgb.shape[:2]
+        if sal.shape != (h, w):
+            sal = cv2.resize(sal, (w, h), interpolation=cv2.INTER_LINEAR)
+        sal8 = np.clip(sal * 255.0, 0, 255).astype(np.uint8)
+        heatmap_bgr = cv2.applyColorMap(sal8, cv2.COLORMAP_JET)
+        heatmap_rgb = cv2.cvtColor(heatmap_bgr, cv2.COLOR_BGR2RGB)
+        blended = cv2.addWeighted(heatmap_rgb, float(alpha), base_rgb, float(1.0 - alpha), 0)
+        return Image.fromarray(blended)
 
     def start_conversion(self) -> None:
         """Kick off conversion in a worker thread."""
@@ -295,31 +419,42 @@ class BeadsApp:
             width = int(self.width_var.get())
             height = int(self.height_var.get())
             num_colors = int(self.num_colors_var.get())
-            saliency_strength = float(self.saliency_strength_var.get())
         except ValueError:
-            messagebox.showerror("入力エラー", "幅・高さ・色数には整数を、強度には数値を入力してください。")
+            messagebox.showerror("入力エラー", "幅・高さ・色数には整数を入力してください。")
             return None
 
-        if width <= 0 or height <= 0 or num_colors <= 1:
-            messagebox.showerror("入力エラー", "幅・高さは1以上、減色後の色数は2以上にしてください。")
+        if width <= 0 or height <= 0:
+            messagebox.showerror("入力エラー", "幅・高さは1以上にしてください。")
             return None
 
-        saliency_strength = max(self._saliency_min, min(self._saliency_max, saliency_strength))
         keep_aspect = self.lock_aspect_var.get()
 
         mode_label = self.mode_var.get()
         mode = "Lab" if mode_label == "Lab (CIEDE2000)" else mode_label
 
+        division_label = self.division_method_var.get()
         quantize_label = self.quantize_method_var.get()
-        if quantize_label == "ブロック減色":
+
+        if division_label == "ブロック分割":
             quantize_method = "block"
+        elif division_label == "適応型ブロック分割":
+            quantize_method = "adaptive_block"
         elif quantize_label == "Wu減色":
             quantize_method = "wu"
-        else:
+        elif quantize_label == "K-means":
             quantize_method = "kmeans"
+        else:
+            quantize_method = "none"
+
+        if quantize_method not in {"none", "block", "adaptive_block"} and num_colors <= 1:
+            messagebox.showerror("入力エラー", "減色後の色数は2以上にしてください。")
+            return None
 
         pipeline_label = self.pipeline_var.get()
-        if pipeline_label == "減色→リサイズ":
+        if quantize_method in {"block", "adaptive_block"}:
+            # ブロック系は常にリサイズ→減色で固定
+            pipeline = "resize_first"
+        elif pipeline_label == "減色→リサイズ":
             pipeline = "quantize_first"
         elif pipeline_label == "ハイブリッド":
             pipeline = "hybrid"
@@ -332,10 +467,11 @@ class BeadsApp:
             num_colors=num_colors,
             mode=mode,
             quantize_method=quantize_method,
+            division_method=division_label,
             keep_aspect=keep_aspect,
             pipeline=pipeline,
-            use_saliency=self.use_saliency_var.get(),
-            saliency_strength=saliency_strength,
+            contour_enhance=self.contour_enhance_var.get(),
+            adaptive_weight=max(0.0, min(1.0, float(self.adaptive_weight_var.get()) / 100.0)),
         )
 
     def _build_pending_settings(self, request: ConversionRequest) -> dict:
@@ -346,10 +482,11 @@ class BeadsApp:
             "色数": request.num_colors,
             "色空間": self.mode_var.get(),
             "減色方式": self.quantize_method_var.get(),
+            "分割方式": self.division_method_var.get(),
             "処理順序": self.pipeline_var.get(),
             "比率固定": request.keep_aspect,
-            "サリエンシー": request.use_saliency,
-            "サリエンシー強度": round(request.saliency_strength, 2),
+            "輪郭線強調": request.contour_enhance,
+            "細かさ（顔まわり）": round(request.adaptive_weight * 100),
         }
 
     def _prepare_conversion_ui(self) -> None:
@@ -390,10 +527,12 @@ class BeadsApp:
                 quantize_method=request.quantize_method,
                 keep_aspect=request.keep_aspect,
                 pipeline=request.pipeline,
-                use_saliency=request.use_saliency,
-                saliency_strength=request.saliency_strength,
+                eye_importance_scale=0.8,
+                contour_enhance=request.contour_enhance,
+                adaptive_saliency_weight=request.adaptive_weight,
                 progress_callback=progress_cb,
                 cancel_event=cancel_event,
+                saliency_map=self.saliency_map,
             )
         except converter.ConversionCancelled:
             self.root.after(0, self._on_cancelled)
@@ -624,9 +763,11 @@ class BeadsApp:
         cell_h = max(1, frame_h - 20)
 
         if self.input_pil:
-            self._input_photo = self._resize_to_box(self.input_pil, cell_w, cell_h)
+            input_source = self.saliency_overlay_pil if (self._show_saliency and self.saliency_overlay_pil) else self.input_pil
+            self._input_photo = self._resize_to_box(input_source, cell_w, cell_h)
             if self._input_photo:
-                self.input_canvas.configure(image=self._input_photo, text="")
+                caption = "サリエンシー重ね表示" if self._show_saliency and self.saliency_overlay_pil else ""
+                self.input_canvas.configure(image=self._input_photo, text=caption)
         display_pil = self.prev_output_pil if self._showing_prev else self.output_pil
         if display_pil:
             photo = self._resize_to_box(display_pil, cell_w, cell_h)
@@ -734,24 +875,67 @@ class BeadsApp:
         orig_w, orig_h = self.original_size
         self._set_size_fields(orig_w, orig_h)
 
-    def _on_saliency_strength_change(self) -> None:
-        """サリエンシー強度スライダーの値を表示用に丸める。"""
-        val = float(self.saliency_strength_var.get())
-        clamped = max(self._saliency_min, min(self._saliency_max, val))
-        snapped = round(clamped, 2)  # 0.01刻み
-        if snapped != val:
-            self.saliency_strength_var.set(snapped)
-        self.saliency_strength_display.set(f"{snapped:.2f}")
+    def _on_adaptive_weight_change(self) -> None:
+        """適応型ブロック用スライダーの値を0〜100で表示用に丸める。"""
+        val = float(self.adaptive_weight_var.get())
+        clamped = max(0.0, min(100.0, val))
+        if clamped != val:
+            self.adaptive_weight_var.set(clamped)
+        self.adaptive_weight_display.set(f"{clamped:.0f}")
+        # 方式が変更された直後にも状態を反映する
+        self._update_adaptive_controls()
 
-    def _on_saliency_pointer(self, event: tk.Event) -> str:
-        """クリック・ドラッグ位置に応じて0.01刻みで値を設定する。"""
+    def _on_adaptive_pointer(self, event: tk.Event) -> str:
+        """スライダーをドラッグした位置から0〜100の値を設定する。"""
         scale: ttk.Scale = event.widget  # type: ignore[assignment]
         width = max(1, scale.winfo_width())
-        # widget左端を0として相対位置を求める
         fraction = max(0.0, min(1.0, event.x / width))
-        new_val = self._saliency_min + fraction * (self._saliency_max - self._saliency_min)
-        self.saliency_strength_var.set(round(new_val, 2))
-        self._on_saliency_strength_change()
-        # 既定動作を抑止し、ジャンプとドラッグを自前で制御する
+        new_val = 100.0 * fraction
+        self.adaptive_weight_var.set(round(new_val, 0))
+        self._on_adaptive_weight_change()
         return "break"
+
+    def _update_num_colors_state(self) -> None:
+        """減色方式が「なし」の場合は色数指定を無効化する。"""
+        is_none = self.quantize_method_var.get() == "なし"
+        state_token = "disabled" if is_none else "!disabled"
+        try:
+            self.num_colors_spin.state([state_token])
+        except Exception:
+            pass
+        # 無効時も内部値は保持しておく（再度有効化した際に復元できるようにする）
+        if hasattr(self, "num_colors_spin"):
+            try:
+                self.num_colors_spin.configure(foreground="#888" if is_none else "#000")
+            except Exception:
+                pass
+
+    def _update_adaptive_controls(self) -> None:
+        """減色方式に応じて適応ブロックスライダーの有効/無効を切り替える。"""
+        is_adaptive = self.division_method_var.get() == "適応型ブロック分割"
+        state_token = "!disabled" if is_adaptive else "disabled"
+        # ttk.Scaleのstateはリスト指定で切り替える
+        try:
+            self.adaptive_scale.state([state_token])
+        except Exception:
+            pass
+        # ラベル色を変えて無効時を分かりやすくする
+        if hasattr(self, "adaptive_label"):
+            self.adaptive_label.configure(foreground="#000" if is_adaptive else "#888")
+
+    def _update_pipeline_controls(self) -> None:
+        """ブロック分割・適応型ブロック分割時は処理順序を固定して選択不可にする。"""
+        is_block_mode = self.division_method_var.get() in {"ブロック分割", "適応型ブロック分割"}
+        if is_block_mode:
+            # UI表示も固定
+            self.pipeline_var.set("リサイズ→減色")
+            try:
+                self.pipeline_box.state(["disabled"])
+            except Exception:
+                pass
+        else:
+            try:
+                self.pipeline_box.state(["!disabled"])
+            except Exception:
+                pass
 
