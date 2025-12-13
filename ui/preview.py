@@ -25,6 +25,11 @@ class PreviewMixin:
             return
         self._show_saliency = not self._show_saliency
         self._update_saliency_button_label()
+        if hasattr(self, "_update_importance_controls_state"):
+            try:
+                self._update_importance_controls_state(self._show_saliency and self.importance_map is not None)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         self._refresh_previews()
 
     def _set_saliency_button_state(self: "BeadsApp", enabled: bool) -> None:
@@ -94,4 +99,3 @@ class PreviewMixin:
         new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
         resized = image.resize(new_size, Image.Resampling.NEAREST)
         return ImageTk.PhotoImage(resized)
-

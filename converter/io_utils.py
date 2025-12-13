@@ -63,15 +63,18 @@ def _compute_resize(
 
 
 def _compute_hybrid_size(
-    shape: Size, target_size: Size, long_side_cap: int = 1600
+    shape: Size, target_size: Size, long_side_cap: int = 1600, scale_percent: float = 100.0
 ) -> Size:
-    """ハイブリッド用の中間リサイズサイズを算出（長辺を上限値まで縮小しつつ出力よりは大きく）。"""
+    """ハイブリッド用の中間リサイズサイズを算出（長辺上限をユーザー指定倍率で調整）。"""
     h, w = shape
     target_w, target_h = target_size
     long_side = max(w, h)
-    if long_side <= long_side_cap:
+    # ユーザー指定の縮小率（%）で上限値をスケール
+    scale_percent = max(1.0, min(100.0, float(scale_percent)))
+    effective_cap = max(1, int(round(long_side_cap * (scale_percent / 100.0))))
+    if long_side <= effective_cap:
         return w, h
-    scale = long_side_cap / long_side
+    scale = effective_cap / long_side
     new_w = max(target_w, int(round(w * scale)))
     new_h = max(target_h, int(round(h * scale)))
     return max(1, new_w), max(1, new_h)

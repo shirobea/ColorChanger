@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+import tkinter as tk
 import numpy as np
 from tkinter import filedialog, messagebox
 from PIL import Image
@@ -42,14 +43,32 @@ class ActionsMixin:
         self._output_photo = None
         self.saliency_map = None
         self.importance_map = None
+        self._base_importance_map = None
+        if hasattr(self, "importance_editor"):
+            self.importance_editor.clear()
         self.saliency_overlay_pil = None
         self._show_saliency = False
         self._set_saliency_button_state(enabled=False)
+        if hasattr(self, "_update_importance_controls_state"):
+            try:
+                self._update_importance_controls_state(False)
+            except Exception:
+                pass
         self.original_size = image.size
         self.output_canvas.configure(image="", text="変換後")
         self._set_initial_target_size(image)
         self._compute_and_store_importance(image)
         self._refresh_previews()
+
+    def _on_space_key(self: "BeadsApp", _event: "tk.Event") -> str:
+        """スペースキーで変換開始/中止をトグルするショートカット。"""
+        # 変換中なら中止、待機中なら開始
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.cancel_conversion()
+        else:
+            self.start_conversion()
+        # ここでイベント伝播を止める（ボタンのactivateを防ぐ）
+        return "break"
 
     def start_conversion(self: "BeadsApp") -> None:
         """Kick off conversion in a worker thread."""
@@ -82,47 +101,76 @@ class ActionsMixin:
         if width <= 0 or height <= 0:
             messagebox.showerror("入力エラー", "幅・高さは1以上にしてください。")
             return None
-        quant_method = self.quantize_method_var.get()
-        division = self.division_method_var.get()
+        quant_label = self.quantize_method_var.get()
+        # UI表示用のラベルを内部向けのコードへ正規化する
+        quant_method = {
+            "なし": "none",
+            "K-means": "kmeans",
+            "Wu減色": "wu",
+        }.get(quant_label, quant_label).lower()
         pipeline = {
             "リサイズ→減色": "resize_first",
             "減色→リサイズ": "quantize_first",
             "ハイブリッド": "hybrid",
         }.get(self.pipeline_var.get(), "resize_first")
-        if division == "ブロック分割":
-            quant_method = "block"
-            pipeline = "resize_first"
-        elif division == "適応型ブロック分割":
-            quant_method = "adaptive_block"
-            pipeline = "resize_first"
+        resize_label = self.resize_method_var.get()
+        resize_method = {
+            "ニアレストネイバー": "nearest",
+            "バイリニア": "bilinear",
+            "バイキュービック": "bicubic",
+            "ブロック分割": "block",
+            "適応型ブロック分割": "adaptive_block",
+        }.get(resize_label, "nearest")
         keep_aspect = self.lock_aspect_var.get()
         contour = self.contour_enhance_var.get()
         adaptive_w = float(self.adaptive_weight_var.get()) / 100.0
+        hybrid_scale = float(self.hybrid_scale_var.get()) / 100.0
         return ConversionRequest(
             width=width,
             height=height,
             num_colors=num_colors,
             mode=self.mode_var.get().replace(" (CIEDE2000)", ""),
             quantize_method=quant_method,
-            division_method=division,
             keep_aspect=keep_aspect,
             pipeline=pipeline,
             contour_enhance=contour,
             adaptive_weight=adaptive_w,
+            hybrid_scale=hybrid_scale,
+            resize_method=resize_method,
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
         """表示用に設定差分を作成する。"""
+        quant_label = {
+            "none": "なし",
+            "kmeans": "K-means",
+            "wu": "Wu減色",
+            "block": "ブロック分割",
+            "adaptive_block": "適応型ブロック分割",
+        }.get(request.quantize_method, request.quantize_method)
+        pipeline_label = {
+            "resize_first": "リサイズ→減色",
+            "quantize_first": "減色→リサイズ",
+            "hybrid": "ハイブリッド",
+        }.get(request.pipeline, request.pipeline)
+        resize_label = {
+            "nearest": "ニアレストネイバー",
+            "bilinear": "バイリニア",
+            "bicubic": "バイキュービック",
+            "block": "ブロック分割",
+            "adaptive_block": "適応型ブロック分割",
+        }.get(request.resize_method, request.resize_method)
         return {
             "幅": request.width,
             "高さ": request.height,
             "減色後色数": request.num_colors,
             "モード": request.mode,
-            "減色方式": request.quantize_method,
-            "分割方式": request.division_method,
-            "処理順序": request.pipeline,
+            "減色方式": quant_label,
+            "処理順序": pipeline_label,
             "輪郭強調": request.contour_enhance,
             "適応細かさ": f"{request.adaptive_weight*100:.0f}",
+            "ハイブリッド縮小率": f"{request.hybrid_scale*100:.0f}",
+            "リサイズ方式": resize_label,
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
@@ -166,6 +214,8 @@ class ActionsMixin:
                 eye_importance_scale=0.8,
                 contour_enhance=request.contour_enhance,
                 adaptive_saliency_weight=request.adaptive_weight,
+                hybrid_scale_percent=request.hybrid_scale * 100.0,
+                resize_method=request.resize_method,
                 progress_callback=progress_cb,
                 cancel_event=cancel_event,
                 saliency_map=self.saliency_map,
@@ -181,17 +231,8 @@ class ActionsMixin:
             self.root.after(0, lambda: self._handle_failure("変換に失敗しました"))
             return
 
-        out_dir = Path.cwd() / "picture"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        output_path = out_dir / f"{self.input_image_path.stem}_beads.png"
-        try:
-            Image.fromarray(result).save(output_path)
-            self.output_path = output_path
-        except Exception as exc:
-            self.root.after(
-                0,
-                lambda: messagebox.showerror("保存失敗", f"出力画像の保存に失敗しました:\n{exc}"),
-            )
+        # 自動保存は行わず、メモリ上で保持するのみ
+        self.output_path = None
         if self.output_pil:
             self.prev_output_pil = self.output_pil
             self.prev_settings = self.last_settings
@@ -213,16 +254,14 @@ class ActionsMixin:
             self.save_button.configure(state="normal" if self.output_image is not None else "disabled")
             self.cancel_event = None
             self.worker_thread = None
-            if self.output_path:
-                self.status_var.set("自動保存完了")
-            else:
-                self.status_var.set("変換完了（保存ボタンで任意の場所に保存できます）")
+            self.status_var.set("変換完了（保存ボタンで任意の場所に保存できます）")
 
         self.root.after(0, on_finish)
 
     def _on_cancelled(self: "BeadsApp") -> None:
         """キャンセル完了時のUI復帰処理。"""
-        self._reset_after_stop("中止しました", clear_canvas=True)
+        # 途中で止めても直前に成功していた出力は残す
+        self._reset_after_stop("中止しました", clear_canvas=False, preserve_output=True)
 
     def _handle_failure(self: "BeadsApp", status: str) -> None:
         """失敗時の共通後始末。"""
@@ -233,7 +272,7 @@ class ActionsMixin:
         if self.output_image is None:
             self.status_var.set("出力画像がまだありません。")
             return
-        initial_dir = str(Path.cwd() / "picture")
+        initial_dir = str(self.input_image_path.parent) if self.input_image_path else str(Path.cwd())
         default_name = (
             f"{self.input_image_path.stem}_beads.png" if self.input_image_path else "output_beads.png"
         )
@@ -269,21 +308,31 @@ class ActionsMixin:
         self.progress_label.configure(text=f"進捗: {percent}% (経過 {elapsed:.1f}s)")
         self.progress_bar["value"] = percent
 
-    def _reset_after_stop(self: "BeadsApp", status: str, clear_canvas: bool) -> None:
+    def _reset_after_stop(
+        self: "BeadsApp",
+        status: str,
+        clear_canvas: bool,
+        preserve_output: bool = False,
+    ) -> None:
         """停止時に共通で状態をリセットする。"""
         self.cancel_event = None
         self.worker_thread = None
         self._start_time = None
-        self.output_image = None
-        self.output_pil = None
-        self.prev_output_pil = None
-        self.output_path = None
+        if not preserve_output:
+            self.output_image = None
+            self.output_pil = None
+            self.prev_output_pil = None
+            self.output_path = None
+            self.diff_var.set("")
         self._pending_settings = None
         self._reset_progress_display()
         self._restore_convert_button()
-        self.save_button.configure(state="disabled")
-        self.diff_var.set("")
-        if clear_canvas:
+        if preserve_output:
+            # 以前の出力があれば保存できるように戻す
+            self.save_button.configure(state="normal" if self.output_image is not None else "disabled")
+        else:
+            self.save_button.configure(state="disabled")
+        if clear_canvas and not preserve_output:
             self.output_canvas.configure(image="", text="変換後")
         self.status_var.set(status)
 

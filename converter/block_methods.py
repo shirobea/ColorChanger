@@ -59,6 +59,7 @@ def _run_block_pipeline(
     config: _PipelineConfig,
     saliency_map: np.ndarray | None = None,
     contour_enhance: bool = False,
+    use_palette: bool = True,
 ) -> np.ndarray:
     """ブロック単位の最多色をとる減色パス。色数指定は無視する。"""
     return _dominant_block_image(
@@ -70,6 +71,7 @@ def _run_block_pipeline(
         cancel_event=config.cancel_event,
         saliency_map=saliency_map,
         contour_enhance=contour_enhance,
+        use_palette=use_palette,
     )
 
 
@@ -82,6 +84,7 @@ def _dominant_block_image(
     cancel_event: CancelEvent | None = None,
     saliency_map: np.ndarray | None = None,
     contour_enhance: bool = False,
+    use_palette: bool = True,
 ) -> np.ndarray:
     """指定サイズのグリッドに分け、各ブロックの最多色で塗りつぶした後にパレットへ写像する。"""
 
@@ -136,20 +139,22 @@ def _dominant_block_image(
         if total_blocks:
             _report(progress_callback, 0.8 * processed / total_blocks, cancel_event)
 
-    centers = dominant.reshape(-1, 3).astype(np.float32)
-    mapping = _map_centers_to_palette(
-        centers,
-        palette,
-        mode,
-        progress_callback=progress_callback,
-        progress_range=(0.8, 0.98),
-        cancel_event=cancel_event,
-    )
-    mapped = palette.rgb_array[mapping].astype(np.uint8).reshape(target_h, target_w, 3)
+    if use_palette:
+        centers = dominant.reshape(-1, 3).astype(np.float32)
+        mapping = _map_centers_to_palette(
+            centers,
+            palette,
+            mode,
+            progress_callback=progress_callback,
+            progress_range=(0.8, 0.98),
+            cancel_event=cancel_event,
+        )
+        mapped = palette.rgb_array[mapping].astype(np.uint8).reshape(target_h, target_w, 3)
+        _report(progress_callback, 1.0, cancel_event)
+        return mapped
 
     _report(progress_callback, 1.0, cancel_event)
-
-    return mapped
+    return dominant.astype(np.uint8)
 
 
 def _adaptive_block_image(
@@ -164,6 +169,7 @@ def _adaptive_block_image(
     fine_scale: int = 2,
     saliency_map: np.ndarray | None = None,
     contour_enhance: bool = False,
+    use_palette: bool = True,
 ) -> np.ndarray:
     """重要度マップを用いて「細かい」or「通常」の2段階でブロック代表色を求める。"""
 
@@ -268,15 +274,19 @@ def _adaptive_block_image(
             if total_blocks:
                 _report(progress_callback, 0.1 + 0.65 * processed / total_blocks, cancel_event)
 
-    centers = output.reshape(-1, 3).astype(np.float32)
-    mapping = _map_centers_to_palette(
-        centers,
-        palette,
-        mode,
-        progress_callback=progress_callback,
-        progress_range=(0.8, 0.98),
-        cancel_event=cancel_event,
-    )
-    mapped = palette.rgb_array[mapping].astype(np.uint8).reshape(target_h, target_w, 3)
+    if use_palette:
+        centers = output.reshape(-1, 3).astype(np.float32)
+        mapping = _map_centers_to_palette(
+            centers,
+            palette,
+            mode,
+            progress_callback=progress_callback,
+            progress_range=(0.8, 0.98),
+            cancel_event=cancel_event,
+        )
+        mapped = palette.rgb_array[mapping].astype(np.uint8).reshape(target_h, target_w, 3)
+        _report(progress_callback, 1.0, cancel_event)
+        return mapped
+
     _report(progress_callback, 1.0, cancel_event)
-    return mapped
+    return output.astype(np.uint8)

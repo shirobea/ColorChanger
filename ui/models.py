@@ -14,8 +14,9 @@ class ConversionRequest:
     num_colors: int
     mode: str
     quantize_method: str
-    division_method: str
     keep_aspect: bool
     pipeline: str
     contour_enhance: bool
     adaptive_weight: float
+    hybrid_scale: float  # ハイブリッド時の縮小率(0.1-1.0)
+    resize_method: str
