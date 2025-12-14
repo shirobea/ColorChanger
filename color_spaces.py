@@ -44,6 +44,51 @@ def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
     return oklab.reshape(original_shape)
 
 
+def cmc_delta_e(lab_sample: np.ndarray, lab_array: np.ndarray, l_weight: float = 2.0, c_weight: float = 1.0) -> np.ndarray:
+    """Vectorized CMC(l:c) between one sample and many targets."""
+    L1, a1, b1 = lab_sample.astype(np.float64)
+    L2 = lab_array[:, 0].astype(np.float64)
+    a2 = lab_array[:, 1].astype(np.float64)
+    b2 = lab_array[:, 2].astype(np.float64)
+
+    C1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    C2 = np.sqrt(a2 ** 2 + b2 ** 2)
+    deltaL = L1 - L2
+    deltaC = C1 - C2
+    deltaa = a1 - a2
+    deltab = b1 - b2
+    deltaH_sq = np.maximum(0.0, deltaa ** 2 + deltab ** 2 - deltaC ** 2)
+
+    H1 = np.degrees(np.arctan2(b1, a1))
+    if H1 < 0:
+        H1 += 360.0
+    if 164.0 <= H1 <= 345.0:
+        T = 0.56 + abs(0.2 * np.cos(np.radians(H1 + 168.0)))
+    else:
+        T = 0.36 + abs(0.4 * np.cos(np.radians(H1 + 35.0)))
+
+    F = 0.0
+    denom_f = C1 ** 4 + 1900.0
+    if denom_f > 0:
+        F = np.sqrt((C1 ** 4) / denom_f)
+
+    S_L = 0.511 if L1 < 16.0 else (0.040975 * L1) / (1 + 0.01765 * L1)
+    S_C = 0.0638 * C1 / (1 + 0.0131 * C1) + 0.638
+    S_H = S_C * (F * T + 1 - F)
+
+    l_w = max(l_weight, 1e-6)
+    c_w = max(c_weight, 1e-6)
+    S_L = max(S_L, 1e-6)
+    S_C = max(S_C, 1e-6)
+    S_H = max(S_H, 1e-6)
+
+    return np.sqrt(
+        (deltaL / (l_w * S_L)) ** 2
+        + (deltaC / (c_w * S_C)) ** 2
+        + deltaH_sq / (S_H ** 2)
+    )
+
+
 def ciede2000(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
     """Vectorized CIEDE2000 between one sample and many targets.
 

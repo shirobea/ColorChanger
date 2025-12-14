@@ -7,7 +7,6 @@ from .pipeline import (
     ConversionCancelled,
     _PipelineConfig,
     _report,
-    _apply_saliency_enhancement,
     _run_quantize_first_pipeline,
     _run_resize_first_pipeline,
     _run_hybrid_pipeline,
@@ -37,6 +36,7 @@ from .block_methods import (
     _map_image_to_palette,
     _run_block_pipeline,
 )
+from .edges import apply_edge_enhancement
 from palette import BeadPalette
 
 __all__ = [
@@ -46,7 +46,6 @@ __all__ = [
     "ProgressCb",
     "CancelEvent",
     "Size",
-    "_apply_saliency_enhancement",
     "_run_quantize_first_pipeline",
     "_run_resize_first_pipeline",
     "_run_hybrid_pipeline",
@@ -74,5 +73,6 @@ __all__ = [
     "_dominant_block_image",
     "_map_image_to_palette",
     "_run_block_pipeline",
+    "apply_edge_enhancement",
     "BeadPalette",
 ]

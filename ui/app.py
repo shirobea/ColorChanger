@@ -71,12 +71,34 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         # リサイズ方式の初期値（指定なし時は最近傍）
         self.resize_method_var = tk.StringVar(value="ニアレストネイバー")
         self.lock_aspect_var = tk.BooleanVar(value=True)
-        self.contour_enhance_var = tk.BooleanVar(value=True)
+        self.edge_enhance_var = tk.BooleanVar(value=False)
+        self.edge_strength_var = tk.DoubleVar(value=60.0)
+        self.edge_strength_display = tk.StringVar(value="60")
+        self.edge_thickness_var = tk.DoubleVar(value=30.0)
+        self.edge_thickness_display = tk.StringVar(value="30")
+        self.edge_gain_var = tk.DoubleVar(value=2.5)
+        self.edge_gain_display = tk.StringVar(value="2.5")
+        self.edge_gamma_var = tk.DoubleVar(value=0.75)
+        self.edge_gamma_display = tk.StringVar(value="0.75")
+        self.edge_saliency_weight_var = tk.DoubleVar(value=50.0)  # 0-100%
+        self.edge_saliency_display = tk.StringVar(value="50")
         self.adaptive_weight_var = tk.DoubleVar(value=50.0)
         self.adaptive_weight_display = tk.StringVar(value="50")
         self.hybrid_scale_var = tk.DoubleVar(value=100.0)
         self.hybrid_scale_display = tk.StringVar(value="100")
         self.quantize_method_var = tk.StringVar(value="Wu減色")
+        # CMC(l:c) 用の係数
+        self.cmc_l_var = tk.DoubleVar(value=2.0)
+        self.cmc_c_var = tk.DoubleVar(value=1.0)
+        self.cmc_l_display = tk.StringVar(value="2.0")
+        self.cmc_c_display = tk.StringVar(value="1.0")
+        # RGBモード用の重み
+        self.rgb_r_weight_var = tk.DoubleVar(value=1.0)
+        self.rgb_g_weight_var = tk.DoubleVar(value=1.0)
+        self.rgb_b_weight_var = tk.DoubleVar(value=1.0)
+        self.rgb_r_display = tk.StringVar(value="1.0")
+        self.rgb_g_display = tk.StringVar(value="1.0")
+        self.rgb_b_display = tk.StringVar(value="1.0")
         self._updating_size_fields = False
         # 重要度編集用のUI状態
         self.brush_mode_var = tk.StringVar(value="add")
@@ -94,6 +116,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._load_settings()
         self._build_layout()
         self._apply_saved_settings()
+        self._update_edge_controls()
         self._update_importance_controls_state(False)
 
 
@@ -500,6 +523,50 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         # 方式が変更された直後にも状態を反映する
         self._update_adaptive_controls()
 
+    def _on_edge_toggle(self) -> None:
+        """輪郭強調ON/OFFに合わせてUIを更新。"""
+        self._update_edge_controls()
+
+    def _on_edge_strength_change(self) -> None:
+        """輪郭強調の強さスライダーの表示値を更新する。"""
+        val = float(self.edge_strength_var.get())
+        clamped = max(0.0, min(100.0, val))
+        if clamped != val:
+            self.edge_strength_var.set(clamped)
+        self.edge_strength_display.set(f"{clamped:.0f}")
+
+    def _on_edge_thickness_change(self) -> None:
+        """輪郭の太さスライダーの表示値を更新する。"""
+        val = float(self.edge_thickness_var.get())
+        clamped = max(0.0, min(100.0, val))
+        if clamped != val:
+            self.edge_thickness_var.set(clamped)
+        self.edge_thickness_display.set(f"{clamped:.0f}")
+
+    def _on_edge_gain_change(self) -> None:
+        """輪郭強調ゲインの表示値を更新する。"""
+        val = float(self.edge_gain_var.get())
+        clamped = max(0.0, min(5.0, val))
+        if clamped != val:
+            self.edge_gain_var.set(clamped)
+        self.edge_gain_display.set(f"{clamped:.2f}")
+
+    def _on_edge_gamma_change(self) -> None:
+        """輪郭重みのガンマ補正値を更新する。"""
+        val = float(self.edge_gamma_var.get())
+        clamped = max(0.2, min(2.5, val))
+        if clamped != val:
+            self.edge_gamma_var.set(clamped)
+        self.edge_gamma_display.set(f"{clamped:.2f}")
+
+    def _on_edge_saliency_change(self) -> None:
+        """サリエンシー寄与率(%)を更新する。"""
+        val = float(self.edge_saliency_weight_var.get())
+        clamped = max(0.0, min(100.0, val))
+        if clamped != val:
+            self.edge_saliency_weight_var.set(clamped)
+        self.edge_saliency_display.set(f"{clamped:.0f}")
+
     def _on_adaptive_pointer(self, event: tk.Event) -> str:
         """スライダーをドラッグした位置から0〜100の値を設定する。"""
         scale: ttk.Scale = event.widget  # type: ignore[assignment]
@@ -523,6 +590,26 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         var.set(new_val)
         on_change()
         return "break"
+
+    def _on_edge_pointer(self, event: tk.Event) -> str:
+        """輪郭強調スライダーの直接クリック用ハンドラ。"""
+        return self._set_scale_by_pointer(event, self.edge_strength_var, self._on_edge_strength_change)
+
+    def _on_edge_thickness_pointer(self, event: tk.Event) -> str:
+        """輪郭太さスライダーの直接クリック用ハンドラ。"""
+        return self._set_scale_by_pointer(event, self.edge_thickness_var, self._on_edge_thickness_change)
+
+    def _on_edge_gain_pointer(self, event: tk.Event) -> str:
+        """輪郭ゲインスライダーの直接クリック用ハンドラ。"""
+        return self._set_scale_by_pointer(event, self.edge_gain_var, self._on_edge_gain_change)
+
+    def _on_edge_gamma_pointer(self, event: tk.Event) -> str:
+        """輪郭ガンマスライダーの直接クリック用ハンドラ。"""
+        return self._set_scale_by_pointer(event, self.edge_gamma_var, self._on_edge_gamma_change)
+
+    def _on_edge_saliency_pointer(self, event: tk.Event) -> str:
+        """サリエンシー寄与スライダーの直接クリック用ハンドラ。"""
+        return self._set_scale_by_pointer(event, self.edge_saliency_weight_var, self._on_edge_saliency_change)
 
     def _on_hybrid_pointer(self, event: tk.Event) -> str:
         """ハイブリッド縮小率スライダーのクリック位置から値を設定。"""
@@ -587,6 +674,36 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         if hasattr(self, "hybrid_label"):
             self.hybrid_label.configure(foreground="#000" if is_hybrid else "#888")
 
+    def _update_edge_controls(self) -> None:
+        """輪郭強調のON/OFFに応じて強さスライダーを切り替える。"""
+        enabled = self.edge_enhance_var.get()
+        state_token = "!disabled" if enabled else "disabled"
+        try:
+            self.edge_strength_scale.state([state_token])
+        except Exception:
+            pass
+        try:
+            self.edge_thickness_scale.state([state_token])
+        except Exception:
+            pass
+        for scale_name in ["edge_gain_scale", "edge_gamma_scale", "edge_saliency_scale"]:
+            widget = getattr(self, scale_name, None)
+            if widget:
+                try:
+                    widget.state([state_token])
+                except Exception:
+                    pass
+        if hasattr(self, "edge_label"):
+            self.edge_label.configure(foreground="#000" if enabled else "#888")
+        if hasattr(self, "edge_thickness_label"):
+            self.edge_thickness_label.configure(foreground="#000" if enabled else "#888")
+        if hasattr(self, "edge_gain_label"):
+            self.edge_gain_label.configure(foreground="#000" if enabled else "#888")
+        if hasattr(self, "edge_gamma_label"):
+            self.edge_gamma_label.configure(foreground="#000" if enabled else "#888")
+        if hasattr(self, "edge_saliency_label"):
+            self.edge_saliency_label.configure(foreground="#000" if enabled else "#888")
+
     def _apply_saved_settings(self) -> None:
         """settings.jsonに保存された前回値をUIへ反映する。"""
         if not self.last_settings:
@@ -603,6 +720,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         allowed_resize = {"ニアレストネイバー", "バイリニア", "バイキュービック", "ブロック分割", "適応型ブロック分割"}
         sanitized_settings = dict(self.last_settings)
         sanitized_settings.pop("分割方式", None)  # 旧キーは破棄
+        sanitized_settings.pop("輪郭強調", None)  # 廃止した項目を破棄
         # 起動直後は幅・高さ欄を必ず空にする（前回値は復元しない）
         self.width_var.set("")
         self.height_var.set("")
@@ -624,9 +742,6 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         sanitized_settings["リサイズ方式"] = resize_label
         self.quantize_method_var.set(quant_label)
         self.pipeline_var.set(pipeline)
-        contour = self.last_settings.get("輪郭強調")
-        if isinstance(contour, bool):
-            self.contour_enhance_var.set(contour)
         adaptive_val = self.last_settings.get("適応細かさ")
         try:
             if adaptive_val is not None:
@@ -643,10 +758,103 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
                 self.hybrid_scale_display.set(f"{h_val:.0f}")
         except Exception:
             pass
+        try:
+            cmc_l = self.last_settings.get("CMC l")
+            if cmc_l is not None:
+                l_val = float(cmc_l)
+                self.cmc_l_var.set(l_val)
+                self.cmc_l_display.set(f"{max(0.5, min(3.0, l_val)):.1f}")
+        except Exception:
+            pass
+        try:
+            cmc_c = self.last_settings.get("CMC c")
+            if cmc_c is not None:
+                c_val = float(cmc_c)
+                self.cmc_c_var.set(c_val)
+                self.cmc_c_display.set(f"{max(0.5, min(3.0, c_val)):.1f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault("CMC l", f"{float(self.cmc_l_var.get()):.1f}")
+        sanitized_settings.setdefault("CMC c", f"{float(self.cmc_c_var.get()):.1f}")
+        edge_flag = self.last_settings.get("輪郭強調(新)")
+        if isinstance(edge_flag, bool):
+            self.edge_enhance_var.set(edge_flag)
+        edge_strength = self.last_settings.get("輪郭強さ")
+        try:
+            if edge_strength is not None:
+                e_val = float(edge_strength)
+                self.edge_strength_var.set(e_val)
+                self.edge_strength_display.set(f"{max(0.0, min(100.0, e_val)):.0f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault("輪郭強調(新)", bool(self.edge_enhance_var.get()))
+        sanitized_settings.setdefault("輪郭強さ", f"{float(self.edge_strength_var.get()):.0f}")
+        edge_thickness = self.last_settings.get("輪郭太さ")
+        try:
+            if edge_thickness is not None:
+                t_val = float(edge_thickness)
+                self.edge_thickness_var.set(t_val)
+                self.edge_thickness_display.set(f"{max(0.0, min(100.0, t_val)):.0f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault("輪郭太さ", f"{float(self.edge_thickness_var.get()):.0f}")
+        edge_gain = self.last_settings.get("輪郭ゲイン")
+        try:
+            if edge_gain is not None:
+                g_val = float(edge_gain)
+                self.edge_gain_var.set(g_val)
+                self.edge_gain_display.set(f"{max(0.0, min(5.0, g_val)):.2f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault("輪郭ゲイン", f"{float(self.edge_gain_var.get()):.2f}")
+        edge_gamma = self.last_settings.get("輪郭ガンマ")
+        try:
+            if edge_gamma is not None:
+                gm_val = float(edge_gamma)
+                self.edge_gamma_var.set(gm_val)
+                self.edge_gamma_display.set(f"{max(0.2, min(2.5, gm_val)):.2f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault("輪郭ガンマ", f"{float(self.edge_gamma_var.get()):.2f}")
+        edge_saliency = self.last_settings.get("輪郭サリエンシー寄与(%)")
+        try:
+            if edge_saliency is not None:
+                s_val = float(edge_saliency)
+                self.edge_saliency_weight_var.set(s_val)
+                self.edge_saliency_display.set(f"{max(0.0, min(100.0, s_val)):.0f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault("輪郭サリエンシー寄与(%)", f"{float(self.edge_saliency_weight_var.get()):.0f}")
+        try:
+            rgb_w = self.last_settings.get("RGB重み")
+            if isinstance(rgb_w, (list, tuple)) and len(rgb_w) == 3:
+                r, g, b = (float(x) for x in rgb_w)
+                self.rgb_r_weight_var.set(r)
+                self.rgb_g_weight_var.set(g)
+                self.rgb_b_weight_var.set(b)
+                self.rgb_r_display.set(f"{max(0.5, min(2.0, r)):.1f}")
+                self.rgb_g_display.set(f"{max(0.5, min(2.0, g)):.1f}")
+                self.rgb_b_display.set(f"{max(0.5, min(2.0, b)):.1f}")
+        except Exception:
+            pass
+        sanitized_settings.setdefault(
+            "RGB重み",
+            [
+                float(self.rgb_r_weight_var.get()),
+                float(self.rgb_g_weight_var.get()),
+                float(self.rgb_b_weight_var.get()),
+            ],
+        )
         # サニタイズ後の内容を今後の差分比較・保存に反映させる
         self.last_settings = sanitized_settings
         # 状態反映
         self._update_num_colors_state()
         self._update_adaptive_controls()
+        self._update_edge_controls()
+        if hasattr(self, "_update_mode_frames"):
+            try:
+                self._update_mode_frames()
+            except Exception:
+                pass
         self._update_pipeline_controls()
-
+        self._update_cmc_controls()

@@ -8,7 +8,7 @@ import threading
 import cv2
 import numpy as np
 
-from color_spaces import ciede2000, rgb_to_lab, rgb_to_oklab
+from color_spaces import ciede2000, cmc_delta_e, rgb_to_lab, rgb_to_oklab
 from palette import BeadPalette
 
 if TYPE_CHECKING:
@@ -177,6 +177,9 @@ def _map_centers_to_palette(
     progress_callback: ProgressCb | None = None,
     progress_range: tuple[float, float] = (0.5, 0.8),
     cancel_event: CancelEvent | None = None,
+    cmc_l: float = 2.0,
+    cmc_c: float = 1.0,
+    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> np.ndarray:
     """量子化後の中心色をビーズパレットへ最近傍対応付けする。"""
     mode_upper = mode.upper()
@@ -186,20 +189,32 @@ def _map_centers_to_palette(
     span = max(0.0, end - start)
 
     if mode_upper == "RGB":
+        w_r, w_g, w_b = (float(w) for w in rgb_weights)
         diff = centers[:, None, :] - palette.rgb_array[None, :, :]
-        distances = np.sum(diff ** 2, axis=2)
+        weights = np.array([max(w_r, 1e-6), max(w_g, 1e-6), max(w_b, 1e-6)], dtype=np.float32)
+        weighted = diff * weights[None, None, :]
+        distances = np.sum(weighted ** 2, axis=2)
         mapping = np.argmin(distances, axis=1)
     elif mode_upper == "OKLAB":
         center_oklab = rgb_to_oklab(centers)
         diff = center_oklab[:, None, :] - palette.oklab_array[None, :, :]
         distances = np.sum(diff ** 2, axis=2)
         mapping = np.argmin(distances, axis=1)
+    elif mode_upper.startswith("CMC"):
+        center_lab = rgb_to_lab(centers)
+        l_weight = max(float(cmc_l), 1e-6)
+        c_weight = max(float(cmc_c), 1e-6)
+        for idx, lab_value in enumerate(center_lab):
+            distances = cmc_delta_e(lab_value, palette.lab_array, l_weight, c_weight)
+            mapping[idx] = int(np.argmin(distances))
+            _report(progress_callback, start + span * (idx + 1) / max(1, total), cancel_event)
+        return mapping
     else:  # Lab + CIEDE2000
         center_lab = rgb_to_lab(centers)
         for idx, lab_value in enumerate(center_lab):
             distances = ciede2000(lab_value, palette.lab_array)
             mapping[idx] = int(np.argmin(distances))
-            _report(progress_callback, start + span * (idx + 1) / total, cancel_event)
+            _report(progress_callback, start + span * (idx + 1) / max(1, total), cancel_event)
         return mapping
 
     _report(progress_callback, end, cancel_event)
@@ -232,6 +247,9 @@ class _PaletteQuantizer:
             self.config.progress_callback,
             progress_range=(progress_base, progress_after_map),
             cancel_event=self.config.cancel_event,
+            cmc_l=self.config.cmc_l,
+            cmc_c=self.config.cmc_c,
+            rgb_weights=self.config.rgb_weights,
         )
         mapped_colors = self.config.palette.rgb_array[center_to_palette].astype(np.uint8)
         return mapped_colors[labels].reshape(img.shape).astype(np.uint8)

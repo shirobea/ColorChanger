@@ -11,9 +11,8 @@ import numpy as np
 
 from palette import BeadPalette
 from .io_utils import _compute_hybrid_size, _compute_resize, _load_image_rgb
+from .edges import apply_edge_enhancement
 from .saliency import (
-    ImportanceWeights,
-    _compute_saliency_map,
     _normalize_saliency,
     compute_importance_map,
 )
@@ -31,6 +30,9 @@ class _PipelineConfig:
 
     palette: BeadPalette
     mode: str
+    rgb_weights: tuple[float, float, float]
+    cmc_l: float
+    cmc_c: float
     num_colors: int
     quantize_method: str
     target_size: Size
@@ -51,21 +53,6 @@ def _report(progress_callback: ProgressCb | None, value: float, cancel_event: Ca
         raise ConversionCancelled()
     if progress_callback:
         progress_callback(value)
-
-
-def _apply_saliency_enhancement(image_rgb: np.ndarray, saliency: np.ndarray, strength: float = 0.7) -> np.ndarray:
-    """重要度の高い領域だけ輪郭を強調する（パレット外の色は使わずに保持）。"""
-    h, w = image_rgb.shape[:2]
-    saliency_resized = cv2.resize(saliency, (w, h), interpolation=cv2.INTER_LINEAR)
-    saliency_resized = np.clip(saliency_resized, 0.0, 1.0)[..., None]
-
-    img_f = image_rgb.astype(np.float32)
-    blurred = cv2.GaussianBlur(img_f, (0, 0), sigmaX=1.2)
-    high_freq = img_f - blurred  # 高周波成分
-
-    boost = 0.35 + strength * saliency_resized
-    enhanced = img_f + high_freq * boost
-    return np.clip(enhanced, 0, 255).astype(np.uint8)
 
 
 def _run_quantize_first_pipeline(
@@ -125,6 +112,9 @@ def _run_map_only_resize_first(
         resized,
         config.palette,
         config.mode,
+        rgb_weights=config.rgb_weights,
+        cmc_l=config.cmc_l,
+        cmc_c=config.cmc_c,
         progress_callback=config.progress_callback,
         progress_range=(0.35, 0.95),
         cancel_event=config.cancel_event,
@@ -141,6 +131,9 @@ def _run_map_only_quantize_first(
         image_rgb,
         config.palette,
         config.mode,
+        rgb_weights=config.rgb_weights,
+        cmc_l=config.cmc_l,
+        cmc_c=config.cmc_c,
         progress_callback=config.progress_callback,
         progress_range=(0.15, 0.8),
         cancel_event=config.cancel_event,
@@ -170,6 +163,9 @@ def _run_map_only_hybrid(
         image_mid,
         config.palette,
         config.mode,
+        rgb_weights=config.rgb_weights,
+        cmc_l=config.cmc_l,
+        cmc_c=config.cmc_c,
         progress_callback=config.progress_callback,
         progress_range=(0.35, 0.9),
         cancel_event=config.cancel_event,
@@ -208,7 +204,12 @@ def convert_image(
     quantize_method: str = "kmeans",
     keep_aspect: bool = True,
     pipeline: str = "resize_first",
-    contour_enhance: bool = False,
+    edge_enhance: bool = False,
+    edge_strength: float = 0.6,
+    edge_thickness: float = 0.0,
+    edge_gain: float = 2.5,
+    edge_gamma: float = 0.75,
+    edge_saliency_weight: float = 0.5,
     eye_importance_scale: float = 0.8,
     adaptive_saliency_weight: float = 0.5,
     fine_scale: int = 2,
@@ -217,6 +218,9 @@ def convert_image(
     cancel_event: CancelEvent | None = None,
     hybrid_scale_percent: float = 100.0,
     resize_method: str = "nearest",
+    cmc_l: float = 2.0,
+    cmc_c: float = 1.0,
+    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> np.ndarray:
     """入力画像をビーズパレットへ変換する外部公開API。"""
     _report(progress_callback, 0.0, cancel_event)
@@ -224,6 +228,22 @@ def convert_image(
     original_rgb = image_rgb.copy()
 
     precomputed_saliency = _normalize_saliency(saliency_map) if saliency_map is not None else None
+
+    if edge_enhance:
+        strength = max(0.0, min(1.0, float(edge_strength)))
+        thickness = max(0.0, min(1.0, float(edge_thickness)))
+        gain = max(0.0, min(10.0, float(edge_gain)))
+        gamma = float(edge_gamma)
+        sal_w = max(0.0, min(1.0, float(edge_saliency_weight)))
+        image_rgb = apply_edge_enhancement(
+            image_rgb,
+            saliency_map=precomputed_saliency,
+            strength=strength,
+            thickness=thickness,
+            gain=gain,
+            gamma=gamma,
+            saliency_weight=sal_w,
+        )
 
     orig_h, orig_w = image_rgb.shape[:2]
     target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
@@ -241,6 +261,9 @@ def convert_image(
     config = _PipelineConfig(
         palette=palette,
         mode=mode,
+        rgb_weights=tuple(rgb_weights),
+        cmc_l=float(cmc_l),
+        cmc_c=float(cmc_c),
         num_colors=num_colors,
         quantize_method=quantize_method,
         target_size=(target_w, target_h),
@@ -250,10 +273,6 @@ def convert_image(
         cancel_event=cancel_event,
         resize_interp=resize_interp,
     )
-
-    saliency_for_contour = None
-    if contour_enhance:
-        saliency_for_contour = precomputed_saliency if precomputed_saliency is not None else _compute_saliency_map(original_rgb)
 
     pipeline_lower = pipeline.lower()
     resize_method_lower = resize_method.lower()
@@ -287,10 +306,11 @@ def convert_image(
                 target_size=size,
                 palette=config.palette,
                 mode=config.mode,
+                rgb_weights=config.rgb_weights,
+                cmc_l=config.cmc_l,
+                cmc_c=config.cmc_c,
                 progress_callback=scaled,
                 cancel_event=config.cancel_event,
-                saliency_map=saliency_for_contour,
-                contour_enhance=contour_enhance,
                 use_palette=use_palette,
             )
 
@@ -305,13 +325,14 @@ def convert_image(
                 target_size=size,
                 palette=config.palette,
                 mode=config.mode,
+                rgb_weights=config.rgb_weights,
+                cmc_l=config.cmc_l,
+                cmc_c=config.cmc_c,
                 saliency_weight=adaptive_saliency_weight,
                 progress_callback=scaled,
                 cancel_event=config.cancel_event,
                 importance_map=importance,
                 fine_scale=fine_scale,
-                saliency_map=saliency_for_contour,
-                contour_enhance=contour_enhance,
                 use_palette=use_palette,
             )
 
@@ -336,6 +357,8 @@ def convert_image(
             progress_callback=scaled,
             progress_range=(0.1, 0.9),
             cancel_event=config.cancel_event,
+            cmc_l=config.cmc_l,
+            cmc_c=config.cmc_c,
         )
         mapped_colors = config.palette.rgb_array[mapping].astype(np.uint8)
         out = mapped_colors[labels].reshape(img.shape).astype(np.uint8)
@@ -401,6 +424,9 @@ def convert_image(
                 img,
                 config.palette,
                 config.mode,
+                rgb_weights=config.rgb_weights,
+                cmc_l=config.cmc_l,
+                cmc_c=config.cmc_c,
                 progress_callback=scaled,
                 progress_range=(0.0, 1.0),
                 cancel_event=config.cancel_event,

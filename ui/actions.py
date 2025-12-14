@@ -101,6 +101,10 @@ class ActionsMixin:
         if width <= 0 or height <= 0:
             messagebox.showerror("入力エラー", "幅・高さは1以上にしてください。")
             return None
+        cmc_l = float(self.cmc_l_var.get())
+        cmc_c = float(self.cmc_c_var.get())
+        cmc_l = max(0.5, min(3.0, cmc_l))
+        cmc_c = max(0.5, min(3.0, cmc_c))
         quant_label = self.quantize_method_var.get()
         # UI表示用のラベルを内部向けのコードへ正規化する
         quant_method = {
@@ -122,21 +126,37 @@ class ActionsMixin:
             "適応型ブロック分割": "adaptive_block",
         }.get(resize_label, "nearest")
         keep_aspect = self.lock_aspect_var.get()
-        contour = self.contour_enhance_var.get()
         adaptive_w = float(self.adaptive_weight_var.get()) / 100.0
         hybrid_scale = float(self.hybrid_scale_var.get()) / 100.0
+        edge_enhance = self.edge_enhance_var.get()
+        edge_strength = max(0.0, min(1.0, float(self.edge_strength_var.get()) / 100.0))
+        edge_thickness = max(0.0, min(1.0, float(self.edge_thickness_var.get()) / 100.0))
+        edge_gain = max(0.0, min(10.0, float(self.edge_gain_var.get())))
+        edge_gamma = max(0.2, min(2.5, float(self.edge_gamma_var.get())))
+        edge_saliency = max(0.0, min(1.0, float(self.edge_saliency_weight_var.get()) / 100.0))
+        r_w = max(0.5, min(2.0, float(self.rgb_r_weight_var.get())))
+        g_w = max(0.5, min(2.0, float(self.rgb_g_weight_var.get())))
+        b_w = max(0.5, min(2.0, float(self.rgb_b_weight_var.get())))
         return ConversionRequest(
             width=width,
             height=height,
             num_colors=num_colors,
             mode=self.mode_var.get().replace(" (CIEDE2000)", ""),
+            cmc_l=cmc_l,
+            cmc_c=cmc_c,
             quantize_method=quant_method,
             keep_aspect=keep_aspect,
             pipeline=pipeline,
-            contour_enhance=contour,
             adaptive_weight=adaptive_w,
             hybrid_scale=hybrid_scale,
             resize_method=resize_method,
+            rgb_weights=(r_w, g_w, b_w),
+            edge_enhance=edge_enhance,
+            edge_strength=edge_strength,
+            edge_thickness=edge_thickness,
+            edge_gain=edge_gain,
+            edge_gamma=edge_gamma,
+            edge_saliency_weight=edge_saliency,
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
@@ -160,17 +180,24 @@ class ActionsMixin:
             "block": "ブロック分割",
             "adaptive_block": "適応型ブロック分割",
         }.get(request.resize_method, request.resize_method)
+        cmc_l = f"{request.cmc_l:.1f}"
+        cmc_c = f"{request.cmc_c:.1f}"
         return {
             "幅": request.width,
             "高さ": request.height,
             "減色後色数": request.num_colors,
             "モード": request.mode,
+            "CMC l": cmc_l,
+            "CMC c": cmc_c,
             "減色方式": quant_label,
             "処理順序": pipeline_label,
-            "輪郭強調": request.contour_enhance,
             "適応細かさ": f"{request.adaptive_weight*100:.0f}",
             "ハイブリッド縮小率": f"{request.hybrid_scale*100:.0f}",
             "リサイズ方式": resize_label,
+            "輪郭強調(新)": request.edge_enhance,
+            "輪郭強さ(0-100)": f"{request.edge_strength*100:.0f}",
+            "輪郭太さ(0-100)": f"{request.edge_thickness*100:.0f}",
+            "RGB重み": [round(request.rgb_weights[0], 1), round(request.rgb_weights[1], 1), round(request.rgb_weights[2], 1)],
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
@@ -206,16 +233,24 @@ class ActionsMixin:
                 input_path=str(self.input_image_path),
                 output_size=(request.width, request.height),
                 mode=request.mode,
+                cmc_l=request.cmc_l,
+                cmc_c=request.cmc_c,
                 palette=self.palette,
                 num_colors=request.num_colors,
                 quantize_method=request.quantize_method,
                 keep_aspect=request.keep_aspect,
                 pipeline=request.pipeline,
                 eye_importance_scale=0.8,
-                contour_enhance=request.contour_enhance,
+                edge_enhance=request.edge_enhance,
+                edge_strength=request.edge_strength,
+                edge_thickness=request.edge_thickness,
+                edge_gain=request.edge_gain,
+                edge_gamma=request.edge_gamma,
+                edge_saliency_weight=request.edge_saliency_weight,
                 adaptive_saliency_weight=request.adaptive_weight,
                 hybrid_scale_percent=request.hybrid_scale * 100.0,
                 resize_method=request.resize_method,
+                rgb_weights=request.rgb_weights,
                 progress_callback=progress_cb,
                 cancel_event=cancel_event,
                 saliency_map=self.saliency_map,

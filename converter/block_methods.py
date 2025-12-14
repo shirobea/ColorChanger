@@ -32,6 +32,9 @@ def _map_image_to_palette(
     image_rgb: np.ndarray,
     palette: BeadPalette,
     mode: str,
+    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    cmc_l: float = 2.0,
+    cmc_c: float = 1.0,
     progress_callback: ProgressCb | None = None,
     progress_range: tuple[float, float] = (0.4, 0.9),
     cancel_event: CancelEvent | None = None,
@@ -48,6 +51,9 @@ def _map_image_to_palette(
         progress_callback=progress_callback,
         progress_range=(start, end),
         cancel_event=cancel_event,
+        cmc_l=cmc_l,
+        cmc_c=cmc_c,
+        rgb_weights=rgb_weights,
     )
     mapped = palette.rgb_array[mapping].astype(np.uint8)[inv].reshape(image_rgb.shape)
     _report(progress_callback, end, cancel_event)
@@ -57,8 +63,6 @@ def _map_image_to_palette(
 def _run_block_pipeline(
     image_rgb: np.ndarray,
     config: _PipelineConfig,
-    saliency_map: np.ndarray | None = None,
-    contour_enhance: bool = False,
     use_palette: bool = True,
 ) -> np.ndarray:
     """ブロック単位の最多色をとる減色パス。色数指定は無視する。"""
@@ -67,10 +71,11 @@ def _run_block_pipeline(
         target_size=config.target_size,
         palette=config.palette,
         mode=config.mode,
+        rgb_weights=config.rgb_weights,
+        cmc_l=config.cmc_l,
+        cmc_c=config.cmc_c,
         progress_callback=config.progress_callback,
         cancel_event=config.cancel_event,
-        saliency_map=saliency_map,
-        contour_enhance=contour_enhance,
         use_palette=use_palette,
     )
 
@@ -80,10 +85,11 @@ def _dominant_block_image(
     target_size: Size,
     palette: BeadPalette,
     mode: str,
+    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    cmc_l: float = 2.0,
+    cmc_c: float = 1.0,
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
-    saliency_map: np.ndarray | None = None,
-    contour_enhance: bool = False,
     use_palette: bool = True,
 ) -> np.ndarray:
     """指定サイズのグリッドに分け、各ブロックの最多色で塗りつぶした後にパレットへ写像する。"""
@@ -99,9 +105,6 @@ def _dominant_block_image(
         working = cv2.resize(image_rgb, (work_w, work_h), interpolation=cv2.INTER_LINEAR)
     else:
         working = image_rgb
-    saliency_work: np.ndarray | None = None
-    if contour_enhance and saliency_map is not None:
-        saliency_work = cv2.resize(np.clip(saliency_map.astype(np.float32), 0.0, 1.0), (work_w, work_h), interpolation=cv2.INTER_LINEAR)
 
     x_edges = np.linspace(0, work_w, target_w + 1, dtype=int)
     y_edges = np.linspace(0, work_h, target_h + 1, dtype=int)
@@ -121,18 +124,8 @@ def _dominant_block_image(
                 dominant_color = fallback_px
             else:
                 flat = block.reshape(-1, 3)
-                if contour_enhance and saliency_work is not None:
-                    sal_block = saliency_work[y0:y1, x0:x1]
-                    sal_flat = sal_block.reshape(-1).astype(np.float32)
-                    if sal_flat.size and sal_flat.max() > 0:
-                        sal_flat = sal_flat / sal_flat.max()
-                    colors, inv = np.unique(flat, axis=0, return_inverse=True)
-                    weights = np.zeros(len(colors), dtype=np.float32)
-                    np.add.at(weights, inv, sal_flat if sal_flat.size == len(inv) else np.ones(len(inv), dtype=np.float32))
-                    dominant_color = colors[weights.argmax()]
-                else:
-                    values, counts = np.unique(flat, axis=0, return_counts=True)
-                    dominant_color = values[counts.argmax()]
+                values, counts = np.unique(flat, axis=0, return_counts=True)
+                dominant_color = values[counts.argmax()]
             dominant[yi, xi] = dominant_color
             processed += 1
 
@@ -148,6 +141,9 @@ def _dominant_block_image(
             progress_callback=progress_callback,
             progress_range=(0.8, 0.98),
             cancel_event=cancel_event,
+            cmc_l=cmc_l,
+            cmc_c=cmc_c,
+            rgb_weights=rgb_weights,
         )
         mapped = palette.rgb_array[mapping].astype(np.uint8).reshape(target_h, target_w, 3)
         _report(progress_callback, 1.0, cancel_event)
@@ -162,14 +158,15 @@ def _adaptive_block_image(
     target_size: Size,
     palette: BeadPalette,
     mode: str,
-    saliency_weight: float,
+    rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    saliency_weight: float = 0.5,
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
     importance_map: np.ndarray | None = None,
     fine_scale: int = 2,
-    saliency_map: np.ndarray | None = None,
-    contour_enhance: bool = False,
     use_palette: bool = True,
+    cmc_l: float = 2.0,
+    cmc_c: float = 1.0,
 ) -> np.ndarray:
     """重要度マップを用いて「細かい」or「通常」の2段階でブロック代表色を求める。"""
 
@@ -183,6 +180,7 @@ def _adaptive_block_image(
             target_size=target_size,
             palette=palette,
             mode=mode,
+            rgb_weights=rgb_weights,
             progress_callback=progress_callback,
             cancel_event=cancel_event,
         )
@@ -202,9 +200,6 @@ def _adaptive_block_image(
     importance_resized = cv2.resize(importance_map, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
     importance_blurred = cv2.GaussianBlur(importance_resized, (0, 0), sigmaX=1.2)
     importance_blurred = np.clip(importance_blurred.astype(np.float32), 0.0, 1.0)
-    saliency_work: np.ndarray | None = None
-    if contour_enhance and saliency_map is not None:
-        saliency_work = cv2.resize(np.clip(saliency_map.astype(np.float32), 0.0, 1.0), (work_w, work_h), interpolation=cv2.INTER_LINEAR)
 
     weight = float(np.clip(saliency_weight, 0.0, 1.0))
     base_threshold = 0.50
@@ -222,8 +217,6 @@ def _adaptive_block_image(
     y_edges = np.linspace(0, work_h, target_h + 1, dtype=int)
 
     working = cv2.resize(working, (work_w, work_h), interpolation=cv2.INTER_LINEAR)
-    if saliency_work is not None:
-        saliency_work = cv2.resize(saliency_work, (work_w, work_h), interpolation=cv2.INTER_LINEAR)
 
     output = np.zeros((target_h, target_w, 3), dtype=np.uint8)
     total_blocks = target_w * target_h
@@ -256,18 +249,8 @@ def _adaptive_block_image(
                 dominant_color = fallback_px
             else:
                 flat = block.reshape(-1, 3)
-                if contour_enhance and saliency_work is not None:
-                    sal_block = saliency_work[sy0:sy1, sx0:sx1]
-                    sal_flat = sal_block.reshape(-1).astype(np.float32)
-                    if sal_flat.size and sal_flat.max() > 0:
-                        sal_flat = sal_flat / sal_flat.max()
-                    colors, inv = np.unique(flat, axis=0, return_inverse=True)
-                    weights = np.zeros(len(colors), dtype=np.float32)
-                    np.add.at(weights, inv, sal_flat if sal_flat.size == len(inv) else np.ones(len(inv), dtype=np.float32))
-                    dominant_color = colors[weights.argmax()]
-                else:
-                    values, counts = np.unique(flat, axis=0, return_counts=True)
-                    dominant_color = values[counts.argmax()]
+                values, counts = np.unique(flat, axis=0, return_counts=True)
+                dominant_color = values[counts.argmax()]
 
             output[yi, xi] = dominant_color
             processed += 1
@@ -283,6 +266,9 @@ def _adaptive_block_image(
             progress_callback=progress_callback,
             progress_range=(0.8, 0.98),
             cancel_event=cancel_event,
+            cmc_l=cmc_l,
+            cmc_c=cmc_c,
+            rgb_weights=rgb_weights,
         )
         mapped = palette.rgb_array[mapping].astype(np.uint8).reshape(target_h, target_w, 3)
         _report(progress_callback, 1.0, cancel_event)

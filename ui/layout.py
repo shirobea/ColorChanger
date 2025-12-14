@@ -44,16 +44,128 @@ class LayoutMixin:
             row=0, column=0, padx=5, pady=5, sticky="w"
         )
 
-        ttk.Label(control_frame, text="変換モード").grid(row=0, column=1, padx=5, pady=5, sticky="e")
+        mode_frame = ttk.LabelFrame(control_frame, text="変換モード")
+        mode_frame.grid(row=0, column=1, columnspan=2, padx=5, pady=5, sticky="we")
+        mode_frame.columnconfigure(1, weight=1)
+        self.mode_frame = mode_frame
+        ttk.Label(mode_frame, text="モード").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self.mode_var = tk.StringVar(value="Oklab")
         mode_box = ttk.Combobox(
-            control_frame,
+            mode_frame,
             textvariable=self.mode_var,
-            values=["なし", "RGB", "Lab (CIEDE2000)", "Oklab"],
+            values=["なし", "RGB", "Lab (CIEDE2000)", "Oklab", "CMC(l:c)"],
             state="readonly",
             width=18,
         )
-        mode_box.grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        mode_box.grid(row=0, column=1, padx=4, pady=4, sticky="we")
+        mode_box.bind("<<ComboboxSelected>>", lambda *_: self._on_mode_changed())
+        # RGB専用スライダー
+        rgb_frame = ttk.LabelFrame(mode_frame, text="RGB重み（RGBモード限定）")
+        rgb_frame.grid(row=1, column=0, columnspan=2, padx=4, pady=(4, 2), sticky="we")
+        for col in range(4):
+            rgb_frame.columnconfigure(col, weight=1)
+        rgb_r_label = ttk.Label(rgb_frame, text="R 重み")
+        rgb_r_label.grid(row=0, column=0, padx=4, pady=4, sticky="e")
+        self.rgb_r_label = rgb_r_label
+        rgb_r_scale = ttk.Scale(
+            rgb_frame,
+            from_=0.5,
+            to=2.0,
+            orient="horizontal",
+            variable=self.rgb_r_weight_var,
+            command=lambda *_: self._on_rgb_r_change(),
+            length=140,
+        )
+        rgb_r_scale.grid(row=0, column=1, padx=4, pady=4, sticky="we")
+        rgb_r_scale.bind("<Button-1>", self._on_rgb_r_pointer)
+        rgb_r_scale.bind("<B1-Motion>", self._on_rgb_r_pointer)
+        self.rgb_r_scale = rgb_r_scale
+        ttk.Label(rgb_frame, textvariable=self.rgb_r_display, width=6).grid(
+            row=0, column=2, padx=2, pady=4, sticky="w"
+        )
+        rgb_g_label = ttk.Label(rgb_frame, text="G 重み")
+        rgb_g_label.grid(row=1, column=0, padx=4, pady=4, sticky="e")
+        self.rgb_g_label = rgb_g_label
+        rgb_g_scale = ttk.Scale(
+            rgb_frame,
+            from_=0.5,
+            to=2.0,
+            orient="horizontal",
+            variable=self.rgb_g_weight_var,
+            command=lambda *_: self._on_rgb_g_change(),
+            length=140,
+        )
+        rgb_g_scale.grid(row=1, column=1, padx=4, pady=4, sticky="we")
+        rgb_g_scale.bind("<Button-1>", self._on_rgb_g_pointer)
+        rgb_g_scale.bind("<B1-Motion>", self._on_rgb_g_pointer)
+        self.rgb_g_scale = rgb_g_scale
+        ttk.Label(rgb_frame, textvariable=self.rgb_g_display, width=6).grid(
+            row=1, column=2, padx=2, pady=4, sticky="w"
+        )
+        rgb_b_label = ttk.Label(rgb_frame, text="B 重み")
+        rgb_b_label.grid(row=2, column=0, padx=4, pady=4, sticky="e")
+        self.rgb_b_label = rgb_b_label
+        rgb_b_scale = ttk.Scale(
+            rgb_frame,
+            from_=0.5,
+            to=2.0,
+            orient="horizontal",
+            variable=self.rgb_b_weight_var,
+            command=lambda *_: self._on_rgb_b_change(),
+            length=140,
+        )
+        rgb_b_scale.grid(row=2, column=1, padx=4, pady=4, sticky="we")
+        rgb_b_scale.bind("<Button-1>", self._on_rgb_b_pointer)
+        rgb_b_scale.bind("<B1-Motion>", self._on_rgb_b_pointer)
+        self.rgb_b_scale = rgb_b_scale
+        ttk.Label(rgb_frame, textvariable=self.rgb_b_display, width=6).grid(
+            row=2, column=2, padx=2, pady=4, sticky="w"
+        )
+        self.rgb_frame = rgb_frame
+        # CMC専用スライダー
+        cmc_frame = ttk.LabelFrame(mode_frame, text="CMC(l:c)")
+        cmc_frame.grid(row=2, column=0, columnspan=2, padx=4, pady=(2, 4), sticky="we")
+        for col in range(4):
+            cmc_frame.columnconfigure(col, weight=1)
+        cmc_l_label = ttk.Label(cmc_frame, text="l（明るさ重み）")
+        cmc_l_label.grid(row=0, column=0, padx=4, pady=4, sticky="e")
+        self.cmc_l_label = cmc_l_label
+        cmc_l_scale = ttk.Scale(
+            cmc_frame,
+            from_=0.5,
+            to=3.0,
+            orient="horizontal",
+            variable=self.cmc_l_var,
+            command=lambda *_: self._on_cmc_l_change(),
+            length=140,
+        )
+        cmc_l_scale.grid(row=0, column=1, padx=4, pady=4, sticky="we")
+        cmc_l_scale.bind("<Button-1>", self._on_cmc_l_pointer)
+        cmc_l_scale.bind("<B1-Motion>", self._on_cmc_l_pointer)
+        self.cmc_l_scale = cmc_l_scale
+        ttk.Label(cmc_frame, textvariable=self.cmc_l_display, width=6).grid(
+            row=0, column=2, padx=2, pady=4, sticky="w"
+        )
+        cmc_c_label = ttk.Label(cmc_frame, text="c（彩度重み）")
+        cmc_c_label.grid(row=1, column=0, padx=4, pady=4, sticky="e")
+        self.cmc_c_label = cmc_c_label
+        cmc_c_scale = ttk.Scale(
+            cmc_frame,
+            from_=0.5,
+            to=3.0,
+            orient="horizontal",
+            variable=self.cmc_c_var,
+            command=lambda *_: self._on_cmc_c_change(),
+            length=140,
+        )
+        cmc_c_scale.grid(row=1, column=1, padx=4, pady=4, sticky="we")
+        cmc_c_scale.bind("<Button-1>", self._on_cmc_c_pointer)
+        cmc_c_scale.bind("<B1-Motion>", self._on_cmc_c_pointer)
+        self.cmc_c_scale = cmc_c_scale
+        ttk.Label(cmc_frame, textvariable=self.cmc_c_display, width=6).grid(
+            row=1, column=2, padx=2, pady=4, sticky="w"
+        )
+        self.cmc_frame = cmc_frame
 
         ttk.Label(control_frame, text="幅(px)").grid(row=1, column=0, padx=5, pady=5, sticky="e")
         ttk.Spinbox(control_frame, from_=1, to=2048, textvariable=self.width_var, width=8).grid(
@@ -181,88 +293,111 @@ class LayoutMixin:
 
         ttk.Checkbutton(
             control_frame,
-            text="輪郭線強調（サリエンシー利用）",
-            variable=self.contour_enhance_var,
+            text="輪郭線強調（新方式）",
+            variable=self.edge_enhance_var,
+            command=self._on_edge_toggle,
         ).grid(row=9, column=0, padx=5, pady=5, sticky="w", columnspan=3)
+        self.edge_label = ttk.Label(control_frame, text="輪郭強調の強さ")
+        self.edge_label.grid(row=10, column=0, padx=5, pady=5, sticky="e")
+        edge_scale = ttk.Scale(
+            control_frame,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self.edge_strength_var,
+            command=lambda *_: self._on_edge_strength_change(),
+            length=140,
+        )
+        edge_scale.grid(row=10, column=1, padx=5, pady=5, sticky="we", columnspan=2)
+        edge_scale.bind("<Button-1>", self._on_edge_pointer)
+        edge_scale.bind("<B1-Motion>", self._on_edge_pointer)
+        self.edge_strength_scale = edge_scale
+        ttk.Label(control_frame, textvariable=self.edge_strength_display, width=5).grid(
+            row=10, column=3, padx=2, pady=5, sticky="w"
+        )
+        self.edge_thickness_label = ttk.Label(control_frame, text="輪郭の太さ")
+        self.edge_thickness_label.grid(row=11, column=0, padx=5, pady=5, sticky="e")
+        edge_thick_scale = ttk.Scale(
+            control_frame,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self.edge_thickness_var,
+            command=lambda *_: self._on_edge_thickness_change(),
+            length=140,
+        )
+        edge_thick_scale.grid(row=11, column=1, padx=5, pady=5, sticky="we", columnspan=2)
+        edge_thick_scale.bind("<Button-1>", self._on_edge_thickness_pointer)
+        edge_thick_scale.bind("<B1-Motion>", self._on_edge_thickness_pointer)
+        self.edge_thickness_scale = edge_thick_scale
+        ttk.Label(control_frame, textvariable=self.edge_thickness_display, width=5).grid(
+            row=11, column=3, padx=2, pady=5, sticky="w"
+        )
+        self.edge_gain_label = ttk.Label(control_frame, text="輪郭ゲイン")
+        self.edge_gain_label.grid(row=12, column=0, padx=5, pady=5, sticky="e")
+        edge_gain_scale = ttk.Scale(
+            control_frame,
+            from_=0.0,
+            to=5.0,
+            orient="horizontal",
+            variable=self.edge_gain_var,
+            command=lambda *_: self._on_edge_gain_change(),
+            length=140,
+        )
+        edge_gain_scale.grid(row=12, column=1, padx=5, pady=5, sticky="we", columnspan=2)
+        edge_gain_scale.bind("<Button-1>", self._on_edge_gain_pointer)
+        edge_gain_scale.bind("<B1-Motion>", self._on_edge_gain_pointer)
+        self.edge_gain_scale = edge_gain_scale
+        ttk.Label(control_frame, textvariable=self.edge_gain_display, width=5).grid(
+            row=12, column=3, padx=2, pady=5, sticky="w"
+        )
+        self.edge_gamma_label = ttk.Label(control_frame, text="輪郭ガンマ")
+        self.edge_gamma_label.grid(row=13, column=0, padx=5, pady=5, sticky="e")
+        edge_gamma_scale = ttk.Scale(
+            control_frame,
+            from_=0.2,
+            to=2.5,
+            orient="horizontal",
+            variable=self.edge_gamma_var,
+            command=lambda *_: self._on_edge_gamma_change(),
+            length=140,
+        )
+        edge_gamma_scale.grid(row=13, column=1, padx=5, pady=5, sticky="we", columnspan=2)
+        edge_gamma_scale.bind("<Button-1>", self._on_edge_gamma_pointer)
+        edge_gamma_scale.bind("<B1-Motion>", self._on_edge_gamma_pointer)
+        self.edge_gamma_scale = edge_gamma_scale
+        ttk.Label(control_frame, textvariable=self.edge_gamma_display, width=5).grid(
+            row=13, column=3, padx=2, pady=5, sticky="w"
+        )
+        self.edge_saliency_label = ttk.Label(control_frame, text="サリエンシー寄与(%)")
+        self.edge_saliency_label.grid(row=14, column=0, padx=5, pady=5, sticky="e")
+        edge_saliency_scale = ttk.Scale(
+            control_frame,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            variable=self.edge_saliency_weight_var,
+            command=lambda *_: self._on_edge_saliency_change(),
+            length=140,
+        )
+        edge_saliency_scale.grid(row=14, column=1, padx=5, pady=5, sticky="we", columnspan=2)
+        edge_saliency_scale.bind("<Button-1>", self._on_edge_saliency_pointer)
+        edge_saliency_scale.bind("<B1-Motion>", self._on_edge_saliency_pointer)
+        self.edge_saliency_scale = edge_saliency_scale
+        ttk.Label(control_frame, textvariable=self.edge_saliency_display, width=5).grid(
+            row=14, column=3, padx=2, pady=5, sticky="w"
+        )
 
         self.convert_button = ttk.Button(control_frame, text="変換実行", command=self.start_conversion)
         self.convert_button.grid(row=0, column=3, padx=10, pady=5, sticky="w")
 
         self.progress_label = ttk.Label(control_frame, text="進捗: 0% (経過 0.0s)")
-        self.progress_label.grid(row=9, column=3, padx=5, pady=5, sticky="w")
+        self.progress_label.grid(row=15, column=3, padx=5, pady=5, sticky="w")
         self.progress_bar = ttk.Progressbar(control_frame, length=160)
-        self.progress_bar.grid(row=10, column=3, padx=5, pady=5, sticky="w")
+        self.progress_bar.grid(row=16, column=3, padx=5, pady=5, sticky="w")
 
         self.save_button = ttk.Button(control_frame, text="出力画像を保存", command=self.save_image, state="disabled")
-        self.save_button.grid(row=11, column=3, padx=5, pady=5, sticky="w")
-
-        # --- 重要度編集ツールバー ---
-        edit_frame = ttk.LabelFrame(control_frame, text="重要度編集")
-        edit_frame.grid(row=13, column=0, columnspan=4, padx=5, pady=(8, 5), sticky="we")
-        # ボタン幅ばらつきを抑えるためカラムの最小幅を揃える
-        for col in range(3):
-            edit_frame.columnconfigure(col, weight=1, minsize=70)
-
-        # 画像⇔重要度マップ切替ボタン（最上段）
-        self.saliency_toggle_button = ttk.Button(
-            edit_frame,
-            text="画像切り替え（通常）",
-            command=self.toggle_saliency_view,
-        )
-        self.saliency_toggle_button.grid(row=0, column=0, padx=4, pady=(4, 6), sticky="we", columnspan=3)
-
-        self.pen_radio = ttk.Radiobutton(edit_frame, text="ペン（加算）", variable=self.brush_mode_var, value="add")
-        self.pen_radio.grid(row=1, column=0, padx=4, pady=2, sticky="w")
-        self.eraser_radio = ttk.Radiobutton(edit_frame, text="消しゴム（減算）", variable=self.brush_mode_var, value="erase")
-        self.eraser_radio.grid(row=1, column=1, padx=4, pady=2, sticky="w")
-
-        ttk.Label(edit_frame, text="半径(px)").grid(row=2, column=0, padx=4, pady=2, sticky="e")
-        radius_scale = ttk.Scale(
-            edit_frame,
-            from_=3,
-            to=64,
-            orient="horizontal",
-            variable=self.brush_radius_var,
-            command=lambda *_: self._on_brush_radius_change(),
-            length=140,
-        )
-        radius_scale.grid(row=2, column=1, padx=4, pady=2, sticky="we")
-        radius_scale.bind("<Button-1>", self._on_brush_radius_pointer)
-        radius_scale.bind("<B1-Motion>", self._on_brush_radius_pointer)
-        self.brush_radius_scale = radius_scale
-        ttk.Label(edit_frame, textvariable=self.brush_radius_display, width=4).grid(
-            row=2, column=2, padx=2, pady=2, sticky="w"
-        )
-
-        ttk.Label(edit_frame, text="強さ").grid(row=3, column=0, padx=4, pady=2, sticky="e")
-        strength_scale = ttk.Scale(
-            edit_frame,
-            from_=5,
-            to=100,
-            orient="horizontal",
-            variable=self.brush_strength_var,
-            command=lambda *_: self._on_brush_strength_change(),
-            length=140,
-        )
-        strength_scale.grid(row=3, column=1, padx=4, pady=2, sticky="we")
-        strength_scale.bind("<Button-1>", self._on_brush_strength_pointer)
-        strength_scale.bind("<B1-Motion>", self._on_brush_strength_pointer)
-        self.brush_strength_scale = strength_scale
-        ttk.Label(edit_frame, textvariable=self.brush_strength_display, width=4).grid(
-            row=3, column=2, padx=2, pady=2, sticky="w"
-        )
-
-        self.undo_button = ttk.Button(edit_frame, text="↶", command=self._undo_importance)
-        self.undo_button.grid(row=4, column=0, padx=4, pady=(4, 2), sticky="we")
-        self.redo_button = ttk.Button(edit_frame, text="↷", command=self._redo_importance)
-        self.redo_button.grid(row=4, column=1, padx=4, pady=(4, 2), sticky="we")
-        self.reset_imp_button = ttk.Button(edit_frame, text="リセット", command=self._reset_importance_edits)
-        self.reset_imp_button.grid(row=4, column=2, padx=4, pady=(4, 2), sticky="we")
-
-        self.fill_hot_button = ttk.Button(edit_frame, text="全重要(赤)", command=self._fill_all_hot)
-        self.fill_hot_button.grid(row=5, column=0, padx=4, pady=(2, 4), sticky="we", columnspan=2)
-        self.fill_cold_button = ttk.Button(edit_frame, text="全て非重要(青)", command=self._fill_all_cold)
-        self.fill_cold_button.grid(row=5, column=2, padx=4, pady=(2, 4), sticky="we")
+        self.save_button.grid(row=17, column=3, padx=5, pady=5, sticky="w")
 
         # 設定差分の表示は重要度編集欄の下へまとめる
         self.diff_label = ttk.Label(
@@ -274,11 +409,140 @@ class LayoutMixin:
             foreground="#444",
             padding=(4, 2),
         )
-        self.diff_label.grid(row=14, column=0, columnspan=4, padx=5, pady=(0, 5), sticky="we")
+        self.diff_label.grid(row=15, column=0, columnspan=4, padx=5, pady=(0, 5), sticky="we")
 
         self._update_adaptive_controls()
         self._update_pipeline_controls()
         self._update_num_colors_state()
+        self._update_mode_frames()
+
+    def _on_mode_changed(self: "BeadsApp") -> None:
+        """モード変更時の付随UI更新（モード専用スライダーの表示/非表示）。"""
+        self._update_mode_frames()
+
+    def _is_cmc_mode(self: "BeadsApp") -> bool:
+        """現在のモードがCMC(l:c)かどうかを判定する。"""
+        return self.mode_var.get().upper().startswith("CMC")
+
+    def _is_rgb_mode(self: "BeadsApp") -> bool:
+        """現在のモードがRGBかどうかを判定する。"""
+        return self.mode_var.get().upper() == "RGB"
+
+    def _on_rgb_r_change(self: "BeadsApp") -> None:
+        """R重みスライダー変更時の表示更新。"""
+        val = float(self.rgb_r_weight_var.get())
+        clamped = max(0.5, min(2.0, val))
+        if clamped != val:
+            self.rgb_r_weight_var.set(clamped)
+        self.rgb_r_display.set(f"{clamped:.1f}")
+
+    def _on_rgb_g_change(self: "BeadsApp") -> None:
+        """G重みスライダー変更時の表示更新。"""
+        val = float(self.rgb_g_weight_var.get())
+        clamped = max(0.5, min(2.0, val))
+        if clamped != val:
+            self.rgb_g_weight_var.set(clamped)
+        self.rgb_g_display.set(f"{clamped:.1f}")
+
+    def _on_rgb_b_change(self: "BeadsApp") -> None:
+        """B重みスライダー変更時の表示更新。"""
+        val = float(self.rgb_b_weight_var.get())
+        clamped = max(0.5, min(2.0, val))
+        if clamped != val:
+            self.rgb_b_weight_var.set(clamped)
+        self.rgb_b_display.set(f"{clamped:.1f}")
+
+    def _on_rgb_r_pointer(self: "BeadsApp", event: "tk.Event") -> str:
+        """R重みスライダーをクリック位置から設定。"""
+        return self._set_scale_by_pointer(event, self.rgb_r_weight_var, self._on_rgb_r_change)
+
+    def _on_rgb_g_pointer(self: "BeadsApp", event: "tk.Event") -> str:
+        """G重みスライダーをクリック位置から設定。"""
+        return self._set_scale_by_pointer(event, self.rgb_g_weight_var, self._on_rgb_g_change)
+
+    def _on_rgb_b_pointer(self: "BeadsApp", event: "tk.Event") -> str:
+        """B重みスライダーをクリック位置から設定。"""
+        return self._set_scale_by_pointer(event, self.rgb_b_weight_var, self._on_rgb_b_change)
+
+    def _update_rgb_weight_controls(self: "BeadsApp") -> None:
+        """RGBモード時だけRGB重みスライダーを有効にする。"""
+        is_rgb = self._is_rgb_mode()
+        state_token = "!disabled" if is_rgb else "disabled"
+        for scale_name in ("rgb_r_scale", "rgb_g_scale", "rgb_b_scale"):
+            scale = getattr(self, scale_name, None)
+            if scale:
+                try:
+                    scale.state([state_token])
+                except Exception:
+                    pass
+        # ラベル色で無効状態を示す
+        for attr in ("rgb_r_label", "rgb_g_label", "rgb_b_label"):
+            lbl = getattr(self, attr, None)
+            if lbl:
+                lbl.configure(foreground="#000" if is_rgb else "#888")
+
+    def _on_cmc_l_change(self: "BeadsApp") -> None:
+        """CMCのl係数スライダー変更時の表示更新。"""
+        val = float(self.cmc_l_var.get())
+        clamped = max(0.5, min(3.0, val))
+        if clamped != val:
+            self.cmc_l_var.set(clamped)
+        self.cmc_l_display.set(f"{clamped:.1f}")
+
+    def _on_cmc_c_change(self: "BeadsApp") -> None:
+        """CMCのc係数スライダー変更時の表示更新。"""
+        val = float(self.cmc_c_var.get())
+        clamped = max(0.5, min(3.0, val))
+        if clamped != val:
+            self.cmc_c_var.set(clamped)
+        self.cmc_c_display.set(f"{clamped:.1f}")
+
+    def _on_cmc_l_pointer(self: "BeadsApp", event: "tk.Event") -> str:
+        """CMC lスライダーをクリック位置から設定。"""
+        return self._set_scale_by_pointer(event, self.cmc_l_var, self._on_cmc_l_change)
+
+    def _on_cmc_c_pointer(self: "BeadsApp", event: "tk.Event") -> str:
+        """CMC cスライダーをクリック位置から設定。"""
+        return self._set_scale_by_pointer(event, self.cmc_c_var, self._on_cmc_c_change)
+
+    def _update_cmc_controls(self: "BeadsApp") -> None:
+        """CMCモード時だけスライダーを有効にする。"""
+        is_cmc = self._is_cmc_mode()
+        state_token = "!disabled" if is_cmc else "disabled"
+        for scale_name in ("cmc_l_scale", "cmc_c_scale"):
+            scale = getattr(self, scale_name, None)
+            if scale:
+                try:
+                    scale.state([state_token])
+                except Exception:
+                    pass
+        # ラベル色で無効状態を示す
+        for lbl_name in ("cmc_l_label", "cmc_c_label"):
+            lbl = getattr(self, lbl_name, None)
+            if lbl:
+                lbl.configure(foreground="#000" if is_cmc else "#888")
+
+    def _update_mode_frames(self: "BeadsApp") -> None:
+        """モードごとに関連フレームを表示/非表示にする。"""
+        mode_upper = self.mode_var.get().upper()
+        is_rgb = mode_upper == "RGB"
+        is_cmc = mode_upper.startswith("CMC")
+        # RGBフレーム
+        if hasattr(self, "rgb_frame"):
+            if is_rgb:
+                self.rgb_frame.grid()
+            else:
+                self.rgb_frame.grid_remove()
+        # CMCフレーム
+        if hasattr(self, "cmc_frame"):
+            if is_cmc:
+                self.cmc_frame.grid()
+            else:
+                self.cmc_frame.grid_remove()
+        # スライダー有効/無効を更新
+        if hasattr(self, "_update_rgb_weight_controls"):
+            self._update_rgb_weight_controls()
+        self._update_cmc_controls()
 
     def _build_preview_panel(self: "BeadsApp", preview_frame: ttk.Frame) -> None:
         """右側のプレビュー領域を組み立てる。"""
