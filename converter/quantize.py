@@ -1,22 +1,18 @@
-"""減色アルゴリズムとパレット対応付けを担うモジュール。"""
+"""パレットへの最短距離マッピングを担う軽量ヘルパー。"""
 
 from __future__ import annotations
 
-from typing import Callable, Tuple, TYPE_CHECKING
+from typing import Callable, Iterable, Tuple
 import threading
 
-import cv2
 import numpy as np
 
-from color_spaces import ciede2000, cmc_delta_e, rgb_to_lab, rgb_to_oklab
+from color_spaces import rgb_to_lab, rgb_to_oklab
 from palette import BeadPalette
-
-if TYPE_CHECKING:
-    from . import _PipelineConfig, ConversionCancelled
 
 ProgressCb = Callable[[float], None]
 CancelEvent = threading.Event
-Size = Tuple[int, int]
+CHUNK_SIZE = 2048  # 距離行列のメモリ肥大化を防ぐチャンクサイズ
 
 
 def _report(progress_callback: ProgressCb | None, value: float, cancel_event: CancelEvent | None = None) -> None:
@@ -28,146 +24,181 @@ def _report(progress_callback: ProgressCb | None, value: float, cancel_event: Ca
         progress_callback(value)
 
 
-def _quantize(image_rgb: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """K-means quantization; returns centers and labels."""
-    data = image_rgb.reshape(-1, 3).astype(np.float32)
-    k = max(1, min(k, len(data)))
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
-    _compactness, labels, centers = cv2.kmeans(
-        data, k, None, criteria, attempts=3, flags=cv2.KMEANS_RANDOM_CENTERS
+def _chunk_ranges(length: int, chunk_size: int) -> Iterable[Tuple[int, int]]:
+    """0-length区間を返さないチャンク分割のイテレータ。"""
+    for start in range(0, length, chunk_size):
+        end = min(length, start + chunk_size)
+        yield start, end
+
+
+def _ciede2000_matrix(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIEDE2000の距離行列をベクトル化して返す。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    l1 = lab1[:, 0][:, None]
+    a1 = lab1[:, 1][:, None]
+    b1 = lab1[:, 2][:, None]
+    l2 = lab2[None, :, 0]
+    a2 = lab2[None, :, 1]
+    b2 = lab2[None, :, 2]
+
+    avg_l = (l1 + l2) * 0.5
+    c1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    c2 = np.sqrt(a2 ** 2 + b2 ** 2)
+    avg_c = (c1 + c2) * 0.5
+    g = 0.5 * (1 - np.sqrt((avg_c ** 7) / (avg_c ** 7 + 25.0 ** 7)))
+    a1p = (1 + g) * a1
+    a2p = (1 + g) * a2
+    c1p = np.sqrt(a1p ** 2 + b1 ** 2)
+    c2p = np.sqrt(a2p ** 2 + b2 ** 2)
+    avg_cp = (c1p + c2p) * 0.5
+
+    h1p = np.degrees(np.arctan2(b1, a1p))
+    h2p = np.degrees(np.arctan2(b2, a2p))
+    h1p = np.where(h1p < 0, h1p + 360.0, h1p)
+    h2p = np.where(h2p < 0, h2p + 360.0, h2p)
+
+    deltahp = h2p - h1p
+    deltahp = np.where(deltahp > 180.0, deltahp - 360.0, deltahp)
+    deltahp = np.where(deltahp < -180.0, deltahp + 360.0, deltahp)
+
+    delta_lp = l2 - l1
+    delta_cp = c2p - c1p
+    delta_hp = 2.0 * np.sqrt(c1p * c2p) * np.sin(np.radians(deltahp) * 0.5)
+
+    avg_hp = (h1p + h2p) * 0.5
+    avg_hp = np.where(np.abs(h1p - h2p) > 180.0, avg_hp + 180.0, avg_hp)
+    avg_hp = np.where(avg_hp >= 360.0, avg_hp - 360.0, avg_hp)
+
+    t = (
+        1
+        - 0.17 * np.cos(np.radians(avg_hp - 30.0))
+        + 0.24 * np.cos(np.radians(2.0 * avg_hp))
+        + 0.32 * np.cos(np.radians(3.0 * avg_hp + 6.0))
+        - 0.20 * np.cos(np.radians(4.0 * avg_hp - 63.0))
     )
-    centers = np.clip(centers, 0, 255).astype(np.float32)
-    labels = labels.flatten()
-    return centers, labels
+
+    sl = 1 + (0.015 * (avg_l - 50.0) ** 2) / np.sqrt(20.0 + (avg_l - 50.0) ** 2)
+    sc = 1 + 0.045 * avg_cp
+    sh = 1 + 0.015 * avg_cp * t
+
+    delta_theta = 30.0 * np.exp(-((avg_hp - 275.0) / 25.0) ** 2)
+    rc = 2.0 * np.sqrt((avg_cp ** 7) / (avg_cp ** 7 + 25.0 ** 7))
+    rt = -np.sin(2.0 * np.radians(delta_theta)) * rc
+
+    return np.sqrt(
+        (delta_lp / sl) ** 2
+        + (delta_cp / sc) ** 2
+        + (delta_hp / sh) ** 2
+        + rt * (delta_cp / sc) * (delta_hp / sh)
+    )
 
 
-def _quantize_wu(image_rgb: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    """Xiaolin Wu 法による高速最適化減色。32^3の3Dヒストグラムから分割を繰り返す。"""
-    pixels = image_rgb.reshape(-1, 3).astype(np.int32)
-    if pixels.size == 0:
-        return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32)
+def _ciede94_matrix(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIE94距離の行列計算（グラフィックアーツ標準）。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    l1 = lab1[:, 0][:, None]
+    a1 = lab1[:, 1][:, None]
+    b1 = lab1[:, 2][:, None]
+    l2 = lab2[None, :, 0]
+    a2 = lab2[None, :, 1]
+    b2 = lab2[None, :, 2]
 
-    bins = (pixels >> 3) + 1  # range 1..32
-    bin_indices = (bins[:, 0], bins[:, 1], bins[:, 2])
+    delta_l = l1 - l2
+    c1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    c2 = np.sqrt(a2 ** 2 + b2 ** 2)
+    delta_c = c1 - c2
 
-    shape = (34, 34, 34)  # 0..33 を安全に含む
-    wt = np.zeros(shape, dtype=np.int32)
-    mr = np.zeros(shape, dtype=np.float64)
-    mg = np.zeros(shape, dtype=np.float64)
-    mb = np.zeros(shape, dtype=np.float64)
-    m2 = np.zeros(shape, dtype=np.float64)
+    delta_e_sq = (l1 - l2) ** 2 + (a1 - a2) ** 2 + (b1 - b2) ** 2
+    delta_h_sq = np.maximum(0.0, delta_e_sq - delta_c ** 2)
 
-    np.add.at(wt, bin_indices, 1)
-    np.add.at(mr, bin_indices, pixels[:, 0])
-    np.add.at(mg, bin_indices, pixels[:, 1])
-    np.add.at(mb, bin_indices, pixels[:, 2])
-    np.add.at(m2, bin_indices, pixels[:, 0] ** 2 + pixels[:, 1] ** 2 + pixels[:, 2] ** 2)
+    k1 = 0.045
+    k2 = 0.015
+    s_l = 1.0
+    s_c = 1.0 + k1 * c1
+    s_h = 1.0 + k2 * c1
 
-    wt = wt.cumsum(axis=0).cumsum(axis=1).cumsum(axis=2)
-    mr = mr.cumsum(axis=0).cumsum(axis=1).cumsum(axis=2)
-    mg = mg.cumsum(axis=0).cumsum(axis=1).cumsum(axis=2)
-    mb = mb.cumsum(axis=0).cumsum(axis=1).cumsum(axis=2)
-    m2 = m2.cumsum(axis=0).cumsum(axis=1).cumsum(axis=2)
+    return np.sqrt((delta_l / s_l) ** 2 + (delta_c / s_c) ** 2 + (delta_h_sq / (s_h ** 2)))
 
-    class Box:
-        """累積和テーブルに対する半開区間 [r0, r1) のキューブ。"""
 
-        def __init__(self, r0: int, r1: int, g0: int, g1: int, b0: int, b1: int) -> None:
-            self.r0, self.r1 = r0, r1
-            self.g0, self.g1 = g0, g1
-            self.b0, self.b1 = b0, b1
+def _ciede76_matrix(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIE76距離の行列計算。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    diff = lab2[None, :, :] - lab1[:, None, :]
+    return np.sqrt(np.sum(diff ** 2, axis=2))
 
-    def vol(table: np.ndarray, box: Box) -> float:
-        return (
-            table[box.r1, box.g1, box.b1]
-            - table[box.r1, box.g1, box.b0]
-            - table[box.r1, box.g0, box.b1]
-            + table[box.r1, box.g0, box.b0]
-            - table[box.r0, box.g1, box.b1]
-            + table[box.r0, box.g1, box.b0]
-            + table[box.r0, box.g0, box.b1]
-            - table[box.r0, box.g0, box.b0]
-        )
 
-    def variance(box: Box) -> float:
-        dr = vol(mr, box)
-        dg = vol(mg, box)
-        db = vol(mb, box)
-        xx = vol(m2, box)
-        wt_box = vol(wt, box)
-        if wt_box == 0:
-            return 0.0
-        return xx - (dr * dr + dg * dg + db * db) / wt_box
+def _cmc_matrix(lab1: np.ndarray, lab2: np.ndarray, l_weight: float, c_weight: float) -> np.ndarray:
+    """CMC(l:c)をサンプル×パレットで一括計算。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    l_w = max(l_weight, 1e-6)
+    c_w = max(c_weight, 1e-6)
 
-    def maximize(box: Box, direction: int, first: int, last: int) -> tuple[float, int]:
-        cut_at = -1
-        max_var = -1.0
-        for i in range(first, last):
-            if direction == 0:
-                box1 = Box(box.r0, i, box.g0, box.g1, box.b0, box.b1)
-                box2 = Box(i, box.r1, box.g0, box.g1, box.b0, box.b1)
-            elif direction == 1:
-                box1 = Box(box.r0, box.r1, box.g0, i, box.b0, box.b1)
-                box2 = Box(box.r0, box.r1, i, box.g1, box.b0, box.b1)
-            else:
-                box1 = Box(box.r0, box.r1, box.g0, box.g1, box.b0, i)
-                box2 = Box(box.r0, box.r1, box.g0, box.g1, i, box.b1)
-            w1 = vol(wt, box1)
-            w2 = vol(wt, box2)
-            if w1 == 0 or w2 == 0:
-                continue
-            mean1 = (vol(mr, box1), vol(mg, box1), vol(mb, box1))
-            mean2 = (vol(mr, box2), vol(mg, box2), vol(mb, box2))
-            var = (
-                np.sum(np.square(mean1)) / w1
-                + np.sum(np.square(mean2)) / w2
-            )
-            if var > max_var:
-                max_var = var
-                cut_at = i
-        return max_var, cut_at
+    l1 = lab1[:, 0][:, None]
+    a1 = lab1[:, 1][:, None]
+    b1 = lab1[:, 2][:, None]
+    l2 = lab2[None, :, 0]
+    a2 = lab2[None, :, 1]
+    b2 = lab2[None, :, 2]
 
-    def split(box: Box) -> tuple[Box, Box]:
-        max_r, cut_r = maximize(box, 0, box.r0 + 1, box.r1)
-        max_g, cut_g = maximize(box, 1, box.g0 + 1, box.g1)
-        max_b, cut_b = maximize(box, 2, box.b0 + 1, box.b1)
-        if max_r >= max_g and max_r >= max_b:
-            return Box(box.r0, cut_r, box.g0, box.g1, box.b0, box.b1), Box(cut_r, box.r1, box.g0, box.g1, box.b0, box.b1)
-        if max_g >= max_r and max_g >= max_b:
-            return Box(box.r0, box.r1, box.g0, cut_g, box.b0, box.b1), Box(box.r0, box.r1, cut_g, box.g1, box.b0, box.b1)
-        return Box(box.r0, box.r1, box.g0, box.g1, box.b0, cut_b), Box(box.r0, box.r1, box.g0, box.g1, cut_b, box.b1)
+    c1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    c2 = np.sqrt(a2 ** 2 + b2 ** 2)
 
-    def create_box_mask(boxes: list[Box]) -> np.ndarray:
-        mask = np.zeros(shape, dtype=np.int32)
-        for idx_box, box in enumerate(boxes):
-            mask[box.r0:box.r1, box.g0:box.g1, box.b0:box.b1] = idx_box
-        return mask
+    delta_l = l1 - l2
+    delta_c = c1 - c2
+    delta_a = a1 - a2
+    delta_b = b1 - b2
+    delta_h_sq = np.maximum(0.0, delta_a ** 2 + delta_b ** 2 - delta_c ** 2)
 
-    # 実データ範囲は 1..32（0 は累積和の基点）。半開区間で上端33ならインデックスは最大32で安全。
-    boxes = [Box(1, 33, 1, 33, 1, 33)]
-    while len(boxes) < k:
-        variances = [variance(b) for b in boxes]
-        idx_max = int(np.argmax(variances))
-        box_to_split = boxes[idx_max]
-        box1, box2 = split(box_to_split)
-        boxes[idx_max] = box1
-        boxes.append(box2)
+    h1 = np.degrees(np.arctan2(b1, a1))
+    h1 = np.where(h1 < 0, h1 + 360.0, h1)
+    t = np.where(
+        (h1 >= 164.0) & (h1 <= 345.0),
+        0.56 + np.abs(0.2 * np.cos(np.radians(h1 + 168.0))),
+        0.36 + np.abs(0.4 * np.cos(np.radians(h1 + 35.0))),
+    )
 
-    box_mask = create_box_mask(boxes)
-    wt_nonzero = max(vol(wt, boxes[0]), 1)
-    centers = np.zeros((len(boxes), 3), dtype=np.float32)
-    for box_idx, box in enumerate(boxes):
-        w = vol(wt, box)
-        if w == 0:
-            w = wt_nonzero
-        centers[box_idx, 0] = vol(mr, box) / w
-        centers[box_idx, 1] = vol(mg, box) / w
-        centers[box_idx, 2] = vol(mb, box) / w
+    denom_f = c1 ** 4 + 1900.0
+    f = np.sqrt((c1 ** 4) / denom_f, where=denom_f > 0, out=np.zeros_like(denom_f))
 
-    labels = box_mask[bin_indices]  # 0-based
-    labels = np.clip(labels, 0, len(centers) - 1)
-    centers = np.clip(centers, 0, 255)
-    return centers.astype(np.float32), labels.astype(np.int32)
+    s_l = np.where(l1 < 16.0, 0.511, (0.040975 * l1) / (1 + 0.01765 * l1))
+    s_c = 0.0638 * c1 / (1 + 0.0131 * c1) + 0.638
+    s_h = s_c * (f * t + 1 - f)
+
+    return np.sqrt((delta_l / (l_w * s_l)) ** 2 + (delta_c / (c_w * s_c)) ** 2 + delta_h_sq / (s_h ** 2))
+
+
+def _compute_lab_distances(
+    centers_lab: np.ndarray, palette_lab: np.ndarray, metric: str
+) -> np.ndarray:
+    """Lab系距離をチャンク単位で計算し、最小インデックスを返す。"""
+    centers_lab = centers_lab.astype(np.float64, copy=False)
+    palette_lab = palette_lab.astype(np.float64, copy=False)
+    metric_upper = metric.upper()
+    if metric_upper == "CIE76":
+        dist_func = _ciede76_matrix
+    elif metric_upper == "CIE94":
+        dist_func = _ciede94_matrix
+    else:
+        dist_func = _ciede2000_matrix
+    distances = dist_func(centers_lab, palette_lab)
+    return np.argmin(distances, axis=1)
+
+
+def _compute_cmc_distances(
+    centers_lab: np.ndarray, palette_lab: np.ndarray, l_weight: float, c_weight: float
+) -> np.ndarray:
+    """CMC(l:c)距離をチャンク単位で計算し、最小インデックスを返す。"""
+    distances = _cmc_matrix(
+        centers_lab.astype(np.float64, copy=False),
+        palette_lab.astype(np.float64, copy=False),
+        l_weight,
+        c_weight,
+    )
+    return np.argmin(distances, axis=1)
 
 
 def _map_centers_to_palette(
@@ -180,8 +211,9 @@ def _map_centers_to_palette(
     cmc_l: float = 2.0,
     cmc_c: float = 1.0,
     rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    lab_metric: str = "CIEDE2000",
 ) -> np.ndarray:
-    """量子化後の中心色をビーズパレットへ最近傍対応付けする。"""
+    """中心色をビーズパレットへ最近傍対応付けする。"""
     mode_upper = mode.upper()
     mapping = np.zeros(len(centers), dtype=np.int32)
     total = len(centers)
@@ -204,52 +236,26 @@ def _map_centers_to_palette(
         center_lab = rgb_to_lab(centers)
         l_weight = max(float(cmc_l), 1e-6)
         c_weight = max(float(cmc_c), 1e-6)
-        for idx, lab_value in enumerate(center_lab):
-            distances = cmc_delta_e(lab_value, palette.lab_array, l_weight, c_weight)
-            mapping[idx] = int(np.argmin(distances))
-            _report(progress_callback, start + span * (idx + 1) / max(1, total), cancel_event)
+        for idx0, idx1 in _chunk_ranges(total, CHUNK_SIZE):
+            chunk = center_lab[idx0:idx1]
+            mapping[idx0:idx1] = _compute_cmc_distances(chunk, palette.lab_array, l_weight, c_weight)
+            _report(progress_callback, start + span * (idx1 / max(1, total)), cancel_event)
         return mapping
-    else:  # Lab + CIEDE2000
+    elif mode_upper.startswith("LAB"):
         center_lab = rgb_to_lab(centers)
-        for idx, lab_value in enumerate(center_lab):
-            distances = ciede2000(lab_value, palette.lab_array)
-            mapping[idx] = int(np.argmin(distances))
-            _report(progress_callback, start + span * (idx + 1) / max(1, total), cancel_event)
+        metric = lab_metric.upper()
+        for idx0, idx1 in _chunk_ranges(total, CHUNK_SIZE):
+            chunk = center_lab[idx0:idx1]
+            mapping[idx0:idx1] = _compute_lab_distances(chunk, palette.lab_array, metric)
+            _report(progress_callback, start + span * (idx1 / max(1, total)), cancel_event)
+        return mapping
+    else:  # Lab + CIEDE2000 (後方互換)
+        center_lab = rgb_to_lab(centers)
+        for idx0, idx1 in _chunk_ranges(total, CHUNK_SIZE):
+            chunk = center_lab[idx0:idx1]
+            mapping[idx0:idx1] = _compute_lab_distances(chunk, palette.lab_array, "CIEDE2000")
+            _report(progress_callback, start + span * (idx1 / max(1, total)), cancel_event)
         return mapping
 
     _report(progress_callback, end, cancel_event)
     return mapping
-
-
-class _PaletteQuantizer:
-    """減色とパレットマッピングをまとめて行うヘルパー。"""
-
-    def __init__(self, config: "_PipelineConfig") -> None:
-        self.config = config
-        self.quantize_lower = config.quantize_method.lower()
-
-    def quantize_and_map(self, img: np.ndarray, progress_base: float, progress_after_map: float) -> np.ndarray:
-        """指定画像を減色し、ビーズパレットに割り当てて返す。"""
-        _report(self.config.progress_callback, progress_base, self.config.cancel_event)
-        if self.config.cancel_event and self.config.cancel_event.is_set():
-            from . import ConversionCancelled
-            raise ConversionCancelled()
-
-        if self.quantize_lower == "wu":
-            centers, labels = _quantize_wu(img, self.config.num_colors)
-        else:
-            centers, labels = _quantize(img, self.config.num_colors)
-
-        center_to_palette = _map_centers_to_palette(
-            centers,
-            self.config.palette,
-            self.config.mode,
-            self.config.progress_callback,
-            progress_range=(progress_base, progress_after_map),
-            cancel_event=self.config.cancel_event,
-            cmc_l=self.config.cmc_l,
-            cmc_c=self.config.cmc_c,
-            rgb_weights=self.config.rgb_weights,
-        )
-        mapped_colors = self.config.palette.rgb_array[center_to_palette].astype(np.uint8)
-        return mapped_colors[labels].reshape(img.shape).astype(np.uint8)

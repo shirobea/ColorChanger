@@ -89,6 +89,38 @@ def cmc_delta_e(lab_sample: np.ndarray, lab_array: np.ndarray, l_weight: float =
     )
 
 
+def ciede76(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
+    """CIE76のΔE。"""
+    delta = lab_array.astype(np.float64) - lab_sample.astype(np.float64)
+    return np.sqrt(np.sum(delta ** 2, axis=1))
+
+
+def ciede94(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
+    """CIE94のΔE（グラフィックアーツ標準）。"""
+    L1, a1, b1 = lab_sample.astype(np.float64)
+    L2 = lab_array[:, 0].astype(np.float64)
+    a2 = lab_array[:, 1].astype(np.float64)
+    b2 = lab_array[:, 2].astype(np.float64)
+
+    deltaL = L1 - L2
+    C1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    C2 = np.sqrt(a2 ** 2 + b2 ** 2)
+    deltaC = C1 - C2
+
+    deltaE_ab_sq = (L1 - L2) ** 2 + (a1 - a2) ** 2 + (b1 - b2) ** 2
+    deltaH_sq = np.maximum(0.0, deltaE_ab_sq - deltaC ** 2)
+
+    kL = kC = kH = 1.0
+    K1 = 0.045
+    K2 = 0.015
+
+    S_L = 1.0
+    S_C = 1.0 + K1 * C1
+    S_H = 1.0 + K2 * C1
+
+    return np.sqrt((deltaL / (kL * S_L)) ** 2 + (deltaC / (kC * S_C)) ** 2 + (deltaH_sq / (kH * S_H) ** 2))
+
+
 def ciede2000(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
     """Vectorized CIEDE2000 between one sample and many targets.
 
