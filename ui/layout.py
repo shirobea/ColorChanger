@@ -75,8 +75,42 @@ class LayoutMixin:
         self.convert_button = ttk.Button(header, text="変換実行", command=self.start_conversion)
         self.convert_button.grid(row=0, column=1, padx=(8, 0), pady=2, sticky="e")
 
+        noise_frame = ttk.LabelFrame(control_frame, text="入力ノイズ除去")
+        noise_frame.grid(row=1, column=0, padx=4, pady=(0, 6), sticky="we")
+        noise_frame.columnconfigure(1, weight=1)
+        ttk.Label(noise_frame, text="フィルタ").grid(row=0, column=0, padx=4, pady=4, sticky="e")
+        noise_filter_box = ttk.Combobox(
+            noise_frame,
+            textvariable=self.noise_filter_var,
+            values=list(self._get_noise_filter_registry().keys()),
+            state="readonly",
+            width=18,
+        )
+        noise_filter_box.grid(row=0, column=1, padx=4, pady=4, sticky="we")
+        self.noise_filter_box = noise_filter_box
+        ttk.Label(noise_frame, text="カーネル(奇数)").grid(row=1, column=0, padx=4, pady=4, sticky="e")
+        size_spin = ttk.Spinbox(
+            noise_frame,
+            from_=3,
+            to=15,
+            increment=2,
+            textvariable=self.noise_filter_size_var,
+            width=8,
+            command=lambda: self._sanitize_kernel_size(self.noise_filter_size_var.get()),
+        )
+        size_spin.grid(row=1, column=1, padx=4, pady=4, sticky="w")
+        size_spin.bind("<FocusOut>", lambda *_: self._sanitize_kernel_size(self.noise_filter_size_var.get()))
+        btn_row = ttk.Frame(noise_frame)
+        btn_row.grid(row=2, column=0, columnspan=2, padx=4, pady=(2, 2), sticky="we")
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
+        self.noise_apply_button = ttk.Button(btn_row, text="ノイズ除去", command=self.apply_noise_reduction)
+        self.noise_apply_button.grid(row=0, column=0, padx=(0, 4), pady=2, sticky="we")
+        self.noise_reset_button = ttk.Button(btn_row, text="リセット", command=self.reset_noise_reduction)
+        self.noise_reset_button.grid(row=0, column=1, padx=(4, 0), pady=2, sticky="we")
+
         mode_frame = ttk.LabelFrame(control_frame, text="変換モード")
-        mode_frame.grid(row=1, column=0, padx=4, pady=(0, 6), sticky="we")
+        mode_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="we")
         mode_frame.columnconfigure(1, weight=1)
         ttk.Label(mode_frame, text="モード").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self.mode_var = tk.StringVar(value="Oklab")
@@ -120,7 +154,7 @@ class LayoutMixin:
         self._build_cmc_sliders(cmc_frame)
 
         size_frame = ttk.LabelFrame(control_frame, text="出力サイズ")
-        size_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="we")
+        size_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
         size_frame.columnconfigure(1, weight=1)
         ttk.Label(size_frame, text="幅(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         ttk.Spinbox(size_frame, from_=1, to=2048, textvariable=self.width_var, width=8).grid(
@@ -159,7 +193,7 @@ class LayoutMixin:
         )
 
         progress_frame = ttk.Frame(control_frame)
-        progress_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        progress_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
         progress_frame.columnconfigure(0, weight=1)
         self.progress_label = ttk.Label(progress_frame, text="進捗: 0% (経過 0.0s)")
         self.progress_label.grid(row=0, column=0, padx=4, pady=(0, 2), sticky="w")
@@ -177,7 +211,21 @@ class LayoutMixin:
             foreground="#444",
             padding=(4, 2),
         )
-        self.diff_label.grid(row=4, column=0, padx=4, pady=(0, 5), sticky="we")
+        self.diff_label.grid(row=5, column=0, padx=4, pady=(0, 5), sticky="we")
+
+        log_frame = ttk.LabelFrame(control_frame, text="処理ログ")
+        log_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
+        log_frame.columnconfigure(0, weight=1)
+        self.log_label = ttk.Label(
+            log_frame,
+            textvariable=self.rgb_log_var,
+            anchor="w",
+            justify="left",
+            wraplength=320,
+            foreground="#333",
+            padding=(4, 2),
+        )
+        self.log_label.grid(row=0, column=0, padx=2, pady=2, sticky="we")
 
         self._update_mode_frames()
 
@@ -230,6 +278,17 @@ class LayoutMixin:
         self.rgb_b_scale = b_scale
         ttk.Label(frame, textvariable=self.rgb_b_display, width=6).grid(row=2, column=2, padx=2, pady=4, sticky="w")
 
+        btn_row = ttk.Frame(frame)
+        btn_row.grid(row=3, column=0, columnspan=3, padx=4, pady=(2, 4), sticky="we")
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
+        ttk.Button(btn_row, text="最適重み算出", command=self.compute_optimal_rgb_weights).grid(
+            row=0, column=0, padx=(0, 4), sticky="we"
+        )
+        ttk.Button(btn_row, text="RGBリセット", command=self.reset_rgb_weights).grid(
+            row=0, column=1, padx=(4, 0), sticky="we"
+        )
+
     def _build_cmc_sliders(self: "BeadsApp", frame: ttk.Frame) -> None:
         ttk.Label(frame, text="l（明るさ重み）").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         l_scale = ttk.Scale(
@@ -262,6 +321,17 @@ class LayoutMixin:
         c_scale.bind("<B1-Motion>", self._on_cmc_c_pointer)
         self.cmc_c_scale = c_scale
         ttk.Label(frame, textvariable=self.cmc_c_display, width=6).grid(row=1, column=2, padx=2, pady=4, sticky="w")
+
+        btn_row = ttk.Frame(frame)
+        btn_row.grid(row=2, column=0, columnspan=3, padx=4, pady=(2, 4), sticky="we")
+        btn_row.columnconfigure(0, weight=1)
+        btn_row.columnconfigure(1, weight=1)
+        ttk.Button(btn_row, text="最適重み算出", command=self.compute_optimal_cmc_weights).grid(
+            row=0, column=0, padx=(0, 4), sticky="we"
+        )
+        ttk.Button(btn_row, text="CMCリセット", command=self.reset_cmc_weights).grid(
+            row=0, column=1, padx=(4, 0), sticky="we"
+        )
 
     def _on_mode_changed(self: "BeadsApp") -> None:
         self._update_mode_frames()
@@ -381,6 +451,9 @@ class LayoutMixin:
     def _build_preview_panel(self: "BeadsApp", preview_frame: ttk.Frame) -> None:
         self.input_canvas = ttk.Label(preview_frame, text="入力画像", anchor="center")
         self.input_canvas.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        self.input_canvas.bind("<ButtonPress-1>", self._on_input_press)
+        self.input_canvas.bind("<ButtonRelease-1>", self._on_input_release)
+        self.input_canvas.bind("<Leave>", self._on_input_release)
 
         self.output_canvas = ttk.Label(preview_frame, text="変換後", anchor="center")
         self.output_canvas.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
@@ -459,6 +532,11 @@ class LayoutMixin:
         if hasattr(self, "diff_label"):
             try:
                 self.diff_label.configure(wraplength=wrap_width)
+            except Exception:
+                pass
+        if hasattr(self, "log_label"):
+            try:
+                self.log_label.configure(wraplength=wrap_width)
             except Exception:
                 pass
         # 元の表示状態に戻す

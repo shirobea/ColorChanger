@@ -57,7 +57,7 @@ def _map_image_to_palette(
 
 
 def convert_image(
-    input_path: str,
+    input_path: str | None,
     output_size: int | Tuple[int, int],
     mode: str,
     palette: BeadPalette,
@@ -69,10 +69,17 @@ def convert_image(
     rgb_weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
     progress_callback: ProgressCb | None = None,
     cancel_event: CancelEvent | None = None,
+    input_image: np.ndarray | None = None,
 ) -> np.ndarray:
     """入力画像を指定サイズへリサイズし、パレットへ写像して返す。"""
     _report(progress_callback, 0.0, cancel_event)
-    image_rgb = _load_image_rgb(input_path)
+    if input_image is not None:
+        # 事前ノイズ除去などで渡されたRGB配列を優先する
+        image_rgb = np.asarray(input_image, dtype=np.uint8)
+    else:
+        if input_path is None:
+            raise ValueError("input_image または input_path を指定してください。")
+        image_rgb = _load_image_rgb(input_path)
     orig_h, orig_w = image_rgb.shape[:2]
     target_w, target_h = _compute_resize((orig_h, orig_w), output_size, keep_aspect)
 

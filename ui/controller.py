@@ -5,6 +5,8 @@ from __future__ import annotations
 import threading
 from typing import Callable, Optional
 
+import numpy as np
+
 import converter
 from palette import BeadPalette
 from .models import ConversionRequest
@@ -37,6 +39,7 @@ class ConversionRunner:
         on_success: Callable[[object], None],
         on_cancelled: Callable[[], None],
         on_error: Callable[[Exception], None],
+        input_image: np.ndarray | None = None,
     ) -> bool:
         """変換スレッドを開始。すでに実行中ならFalseを返す。"""
         if self.is_running:
@@ -50,6 +53,7 @@ class ConversionRunner:
             try:
                 result = converter.convert_image(
                     input_path=input_path,
+                    input_image=input_image,
                     output_size=(request.width, request.height),
                     mode=request.mode,
                     lab_metric=request.lab_metric,

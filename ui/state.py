@@ -17,12 +17,18 @@ class StateMixin:
         """ウィンドウが動いたりリサイズされたら現在位置を覚えておく。"""
         if event.widget is not self.root:
             return
-        self._last_geometry = (
+        current_state = self.root.state()
+        self._last_window_state = current_state
+        geometry = (
             self.root.winfo_width(),
             self.root.winfo_height(),
             self.root.winfo_x(),
             self.root.winfo_y(),
         )
+        self._last_geometry = geometry
+        if current_state == "normal":
+            # 最大化時に復元したときのために通常サイズも保持しておく
+            self._last_normal_geometry = geometry
 
     def _load_window_state(self: "BeadsApp") -> bool:
         """前回終了時のウィンドウ配置を読み込む。"""
@@ -34,9 +40,17 @@ class StateMixin:
             height = int(data.get("height", 0))
             x = int(data.get("x", 0))
             y = int(data.get("y", 0))
+            state = data.get("state", "normal")
+            if state not in ("normal", "zoomed"):
+                state = "normal"
             if width > 0 and height > 0:
                 self.root.geometry(f"{width}x{height}+{x}+{y}")
                 self._last_geometry = (width, height, x, y)
+                self._last_normal_geometry = (width, height, x, y)
+                self._last_window_state = state
+                if state == "zoomed":
+                    # 起動時も最大化を維持
+                    self.root.state("zoomed")
                 return True
         except Exception:
             return False
@@ -81,12 +95,27 @@ class StateMixin:
                 self.root.winfo_x(),
                 self.root.winfo_y(),
             )
-        width, height, x, y = self._last_geometry
+        current_state = self.root.state()
+        if current_state not in ("normal", "zoomed"):
+            current_state = "normal"
+        geometry = self._last_geometry
+        if current_state == "zoomed" and getattr(self, "_last_normal_geometry", None):
+            # 最大化時でも通常サイズを復元できるよう別途保存
+            geometry = self._last_normal_geometry
+        if geometry is None:
+            geometry = (
+                self.root.winfo_width(),
+                self.root.winfo_height(),
+                self.root.winfo_x(),
+                self.root.winfo_y(),
+            )
+        width, height, x, y = geometry
         payload = {
             "width": int(width),
             "height": int(height),
             "x": int(x),
             "y": int(y),
+            "state": current_state,
         }
         try:
             self._window_state_path.write_text(json.dumps(payload), encoding="utf-8")

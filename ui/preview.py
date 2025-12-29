@@ -13,6 +13,34 @@ if TYPE_CHECKING:
 class PreviewMixin:
     """入力/出力画像のプレビュー更新だけを扱う。"""
 
+    def _can_toggle_input_overlay(self: "BeadsApp") -> bool:
+        """入力プレビューで比較表示できるかを判定する。"""
+        if getattr(self, "_noise_busy", False):
+            return False
+        if getattr(self, "_input_using_filtered", False) and self.input_original_pil:
+            return True
+        if not getattr(self, "_input_using_filtered", False) and getattr(self, "input_filtered_pil", None):
+            return True
+        return False
+
+    def _on_input_press(self: "BeadsApp", _event: tk.Event) -> None:
+        """入力プレビューを長押しでノイズ除去前後を表示切替する。"""
+        if getattr(self, "_noise_busy", False):
+            return "break"
+        if self._can_toggle_input_overlay():
+            self._showing_input_overlay = True
+            self._refresh_previews()
+        return None
+
+    def _on_input_release(self: "BeadsApp", _event: tk.Event) -> None:
+        """長押しを離したら通常表示に戻す。"""
+        if getattr(self, "_noise_busy", False):
+            return "break"
+        if self._showing_input_overlay:
+            self._showing_input_overlay = False
+            self._refresh_previews()
+        return None
+
     def _on_output_press(self: "BeadsApp", _event: tk.Event) -> None:
         """出力プレビューを長押しで一つ前の出力に重ね表示する。"""
         if self.prev_output_pil:
@@ -35,11 +63,22 @@ class PreviewMixin:
         cell_w = max(1, (frame_w - 20) // 2)
         cell_h = max(1, frame_h - 20)
 
+        input_display: Optional[Image.Image] = None
+        input_caption = ""
         if self.input_pil:
-            photo = self._resize_to_box(self.input_pil, cell_w, cell_h)
+            input_display = self.input_pil
+            if self._input_using_filtered and self._showing_input_overlay and self.input_original_pil:
+                input_display = self.input_original_pil
+                input_caption = "元画像を表示中"
+            elif (not self._input_using_filtered) and self._showing_input_overlay and self.input_filtered_pil:
+                input_display = self.input_filtered_pil
+                input_caption = "ノイズ除去後を表示中"
+
+        if input_display:
+            photo = self._resize_to_box(input_display, cell_w, cell_h)
             if photo:
                 self._input_photo = photo
-                self.input_canvas.configure(image=self._input_photo, text="")
+                self.input_canvas.configure(image=self._input_photo, text=input_caption)
         else:
             self.input_canvas.configure(image="", text="入力画像")
 

@@ -36,10 +36,15 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._settings_path = Path(__file__).resolve().parent / "settings.json"
         self._restored_geometry = self._load_window_state()
         self._last_geometry: Optional[tuple[int, int, int, int]] = None
+        self._last_normal_geometry: Optional[tuple[int, int, int, int]] = None
+        self._last_window_state: str = "normal"
         self.input_image_path: Optional[Path] = None
         self.output_image: Optional[np.ndarray] = None
         self.output_path: Optional[Path] = None
+        self.input_original_pil: Optional[Image.Image] = None
         self.input_pil: Optional[Image.Image] = None
+        self.input_filtered_pil: Optional[Image.Image] = None
+        self._input_using_filtered = False
         self.output_pil: Optional[Image.Image] = None
         self._input_photo: Optional[ImageTk.PhotoImage] = None
         self._output_photo: Optional[ImageTk.PhotoImage] = None
@@ -69,10 +74,15 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.rgb_r_display = tk.StringVar(value="1.0")
         self.rgb_g_display = tk.StringVar(value="1.0")
         self.rgb_b_display = tk.StringVar(value="1.0")
+        self.rgb_log_var = tk.StringVar(value="")
         self.lab_metric_var = tk.StringVar(value="CIEDE2000")
+        self.noise_filter_var = tk.StringVar(value="メディアン")
+        self.noise_filter_size_var = tk.IntVar(value=3)
         self._updating_size_fields = False
+        self._noise_busy = False
         self._closing = False  # 終了処理中フラグ
         self._showing_prev: bool = False
+        self._showing_input_overlay: bool = False
         self._runner = ConversionRunner(self._schedule_on_ui, lambda: self._closing)
 
         self._load_settings()
