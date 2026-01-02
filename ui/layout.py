@@ -199,8 +199,15 @@ class LayoutMixin:
         self.progress_label.grid(row=0, column=0, padx=4, pady=(0, 2), sticky="w")
         self.save_button = ttk.Button(progress_frame, text="出力画像を保存", command=self.save_image, state="disabled")
         self.save_button.grid(row=0, column=1, padx=(8, 0), pady=(0, 2), sticky="e")
+        self.color_usage_button = ttk.Button(
+            progress_frame,
+            text="色使用一覧",
+            command=self.show_color_usage,
+            state="disabled",
+        )
+        self.color_usage_button.grid(row=0, column=2, padx=(8, 0), pady=(0, 2), sticky="e")
         self.progress_bar = ttk.Progressbar(progress_frame, length=200)
-        self.progress_bar.grid(row=1, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="we")
+        self.progress_bar.grid(row=1, column=0, columnspan=3, padx=4, pady=(0, 2), sticky="we")
 
         self.diff_label = ttk.Label(
             control_frame,

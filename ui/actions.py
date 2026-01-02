@@ -15,6 +15,7 @@ import converter
 import cv2
 from color_spaces import rgb_to_lab
 from .models import ConversionRequest
+from .color_usage_window import ColorUsageWindow
 import numpy as np
 
 if TYPE_CHECKING:
@@ -61,6 +62,9 @@ class ActionsMixin:
             self.noise_filter_var.set(next(iter(filters)))
         self.output_pil = None
         self.output_image = None
+        self.color_usage = []
+        self._set_color_usage_button_state(False)
+        self._refresh_color_usage_window(reset_sort=False)
         # 入力を変えたら前回出力のプレビューは破棄してブレンド表示の混在を防ぐ
         self.prev_output_pil = None
         self._showing_prev = False
@@ -288,10 +292,110 @@ class ActionsMixin:
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
         self.save_button.configure(state="disabled")
+        self._set_color_usage_button_state(False)
         self._start_time = time.perf_counter()
         self.update_progress(0.0)
         self.status_var.set("変換中...")
         self.convert_button.configure(text="変換中止", state="normal", command=self.cancel_conversion)
+
+    def _set_color_usage_button_state(self: "BeadsApp", enabled: bool) -> None:
+        """色使用一覧ボタンの有効/無効を切り替える。"""
+        btn = getattr(self, "color_usage_button", None)
+        if not btn:
+            return
+        state_token = "normal" if enabled else "disabled"
+        try:
+            btn.configure(state=state_token)
+        except Exception:
+            pass
+
+    def _build_color_usage_rows(self: "BeadsApp", image: np.ndarray, settings: Optional[dict]) -> list[dict]:
+        """変換後画像から色使用数の一覧を作る。"""
+        if image is None:
+            return []
+        mode = ""
+        if settings:
+            mode = str(settings.get("モード", ""))
+        if mode.lower() in {"none", "なし"}:
+            return []
+        palette_map: dict[tuple[int, int, int], dict[str, str]] = {}
+        for color in self.palette:
+            rgb = tuple(int(round(v)) for v in color.rgb)
+            palette_map[rgb] = {"color_id": color.color_id, "name": color.name}
+        flat = image.reshape(-1, 3)
+        colors, counts = np.unique(flat, axis=0, return_counts=True)
+        rows: list[dict] = []
+        for rgb_arr, count in zip(colors, counts):
+            rgb = (int(rgb_arr[0]), int(rgb_arr[1]), int(rgb_arr[2]))
+            info = palette_map.get(rgb)
+            if not info:
+                continue
+            rows.append(
+                {
+                    "color_id": info["color_id"],
+                    "name": info["name"],
+                    "count": int(count),
+                    "rgb": rgb,
+                }
+            )
+        rows.sort(key=lambda r: int(r.get("count", 0)), reverse=True)
+        return rows
+
+    def _refresh_color_usage_window(self: "BeadsApp", reset_sort: bool) -> None:
+        """色使用一覧ウィンドウが開いている場合のみ更新する。"""
+        window = getattr(self, "_color_usage_window", None)
+        if window and window.is_alive():
+            window.update_rows(self.color_usage, reset_sort=reset_sort)
+
+    def _update_color_usage_preview(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> None:
+        """色使用一覧のプレビューを更新する。"""
+        window = getattr(self, "_color_usage_window", None)
+        if window and window.is_alive():
+            window.set_preview_image(self._make_color_usage_preview(rgb))
+
+    def _make_color_usage_preview(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> Optional[Image.Image]:
+        """選択色以外を薄くしたプレビュー画像を作る。"""
+        if self.output_image is None or not self.color_usage:
+            return None
+        base = np.asarray(self.output_image, dtype=np.uint8)
+        if rgb is None:
+            return Image.fromarray(base)
+        target = np.array(rgb, dtype=np.uint8)
+        mask = np.all(base == target, axis=2)
+        if not mask.any():
+            return Image.fromarray(base)
+        # 選択していない色は白に寄せて薄く見せる
+        dim_ratio = 0.15
+        dim = base.astype(np.float32) * dim_ratio + 255.0 * (1.0 - dim_ratio)
+        dim = dim.astype(np.uint8)
+        result = base.copy()
+        result[~mask] = dim[~mask]
+        return Image.fromarray(result)
+
+    def _on_color_usage_window_closed(self: "BeadsApp") -> None:
+        """色使用一覧ウィンドウを閉じた後の参照をクリアする。"""
+        self._color_usage_window = None
+
+    def _on_color_usage_select(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> None:
+        """色使用一覧で選択された色に合わせてプレビューを更新する。"""
+        self._update_color_usage_preview(rgb)
+
+    def show_color_usage(self: "BeadsApp") -> None:
+        """色使用一覧ウィンドウを開く。"""
+        if not getattr(self, "color_usage", None):
+            messagebox.showinfo("色使用一覧", "変換後の色一覧がありません。")
+            return
+        window = getattr(self, "_color_usage_window", None)
+        if window and window.is_alive():
+            window.focus()
+            return
+        self._color_usage_window = ColorUsageWindow(
+            self.root,
+            self.color_usage,
+            on_close=self._on_color_usage_window_closed,
+            on_select=self._on_color_usage_select,
+        )
+        self._update_color_usage_preview(None)
 
     def cancel_conversion(self: "BeadsApp") -> None:
         self._runner.cancel()
@@ -310,6 +414,9 @@ class ActionsMixin:
         self._showing_prev = False
         self.output_image = result
         self.output_pil = Image.fromarray(result)
+        self.color_usage = self._build_color_usage_rows(result, self._pending_settings)
+        self._set_color_usage_button_state(bool(self.color_usage))
+        self._refresh_color_usage_window(reset_sort=True)
         self.last_settings = self._pending_settings
         self._pending_settings = None
         self.diff_var.set(self._build_diff_overlay())
@@ -385,6 +492,7 @@ class ActionsMixin:
             self.prev_output_pil = None
             self.output_path = None
             self.diff_var.set("")
+            self.color_usage = []
         self._pending_settings = None
         self._reset_progress_display()
         self._restore_convert_button()
@@ -392,6 +500,8 @@ class ActionsMixin:
             self.save_button.configure(state="normal" if self.output_image is not None else "disabled")
         else:
             self.save_button.configure(state="disabled")
+        self._set_color_usage_button_state(bool(self.output_image is not None and self.color_usage))
+        self._refresh_color_usage_window(reset_sort=False)
         if clear_canvas and not preserve_output:
             self.output_canvas.configure(image="", text="変換後")
         self.status_var.set(status)
