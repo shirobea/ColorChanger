@@ -19,6 +19,7 @@ class BeadColor:
     rgb: tuple[float, float, float]
     lab: tuple[float, float, float]
     oklab: tuple[float, float, float]
+    hunter_lab: tuple[float, float, float]
 
 
 class BeadPalette:
@@ -31,6 +32,8 @@ class BeadPalette:
         self.rgb_array = np.array([c.rgb for c in colors], dtype=np.float32)
         self.lab_array = np.array([c.lab for c in colors], dtype=np.float32)
         self.oklab_array = np.array([c.oklab for c in colors], dtype=np.float32)
+        # Hunter LabはCSVの値をそのまま保持する
+        self.hunter_lab_array = np.array([c.hunter_lab for c in colors], dtype=np.float32)
 
     def __len__(self) -> int:
         return len(self.colors)
@@ -76,7 +79,7 @@ def load_palette(csv_path: str | Path) -> BeadPalette:
                 continue
             header = row
             continue
-        if len(row) < 11:
+        if len(row) < 14:
             continue
         try:
             color = BeadColor(
@@ -85,6 +88,7 @@ def load_palette(csv_path: str | Path) -> BeadPalette:
                 rgb=(float(row[2]), float(row[3]), float(row[4])),
                 lab=(float(row[5]), float(row[6]), float(row[7])),
                 oklab=(float(row[8]), float(row[9]), float(row[10])),
+                hunter_lab=(float(row[11]), float(row[12]), float(row[13])),
             )
             colors.append(color)
         except ValueError:

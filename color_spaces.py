@@ -22,6 +22,42 @@ def srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
     return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
 
 
+def rgb_to_xyz(rgb: np.ndarray) -> np.ndarray:
+    """Convert RGB (0-255) to XYZ (D65, scaled to 0-100)."""
+    arr = np.asarray(rgb, dtype=np.float32)
+    original_shape = arr.shape
+    rgb_norm = arr.reshape(-1, 3) / 255.0
+    linear = srgb_to_linear(rgb_norm)
+
+    xyz = np.empty_like(linear)
+    # sRGB(D65) -> XYZ の標準行列
+    xyz[:, 0] = 0.4124564 * linear[:, 0] + 0.3575761 * linear[:, 1] + 0.1804375 * linear[:, 2]
+    xyz[:, 1] = 0.2126729 * linear[:, 0] + 0.7151522 * linear[:, 1] + 0.0721750 * linear[:, 2]
+    xyz[:, 2] = 0.0193339 * linear[:, 0] + 0.1191920 * linear[:, 1] + 0.9503041 * linear[:, 2]
+    xyz *= 100.0
+    return xyz.reshape(original_shape)
+
+
+def rgb_to_hunter_lab(rgb: np.ndarray) -> np.ndarray:
+    """Convert RGB (0-255) to Hunter Lab (D65)."""
+    arr = np.asarray(rgb, dtype=np.float32)
+    original_shape = arr.shape
+    xyz = rgb_to_xyz(arr).reshape(-1, 3)
+
+    x = xyz[:, 0] / 95.047
+    y = xyz[:, 1] / 100.0
+    z = xyz[:, 2] / 108.883
+    # D65白色点で正規化してHunter Labへ変換
+    sqrt_y = np.sqrt(np.maximum(y, 0.0))
+    denom = np.maximum(sqrt_y, 1e-6)
+    l_val = 100.0 * sqrt_y
+    a_val = 175.0 * (x - y) / denom
+    b_val = 70.0 * (y - z) / denom
+
+    hunter = np.stack([l_val, a_val, b_val], axis=1)
+    return hunter.reshape(original_shape)
+
+
 def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
     """Convert RGB (0-255) to Oklab."""
     arr = np.asarray(rgb, dtype=np.float32)

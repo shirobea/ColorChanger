@@ -117,7 +117,7 @@ class LayoutMixin:
         mode_box = ttk.Combobox(
             mode_frame,
             textvariable=self.mode_var,
-            values=["なし", "RGB", "Lab", "Oklab", "CMC(l:c)"],
+            values=["なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"],
             state="readonly",
             width=18,
         )

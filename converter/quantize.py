@@ -7,7 +7,7 @@ import threading
 
 import numpy as np
 
-from color_spaces import rgb_to_lab, rgb_to_oklab
+from color_spaces import rgb_to_hunter_lab, rgb_to_lab, rgb_to_oklab
 from palette import BeadPalette
 
 ProgressCb = Callable[[float], None]
@@ -230,6 +230,11 @@ def _map_centers_to_palette(
     elif mode_upper == "OKLAB":
         center_oklab = rgb_to_oklab(centers)
         diff = center_oklab[:, None, :] - palette.oklab_array[None, :, :]
+        distances = np.sum(diff ** 2, axis=2)
+        mapping = np.argmin(distances, axis=1)
+    elif mode_upper in {"HUNTER LAB", "HUNTERLAB", "HUNTER"}:
+        center_hunter = rgb_to_hunter_lab(centers)
+        diff = center_hunter[:, None, :] - palette.hunter_lab_array[None, :, :]
         distances = np.sum(diff ** 2, axis=2)
         mapping = np.argmin(distances, axis=1)
     elif mode_upper.startswith("CMC"):

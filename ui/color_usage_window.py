@@ -6,7 +6,7 @@ from typing import Callable, Optional
 
 import tkinter as tk
 from tkinter import ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 
 
 class ColorUsageWindow:
@@ -27,8 +27,17 @@ class ColorUsageWindow:
         self._sort_desc = True
         self._swatch_images: list[ImageTk.PhotoImage] = []
         self._item_rgb: dict[str, tuple[int, int, int]] = {}
+        self._selected_rgb: Optional[tuple[int, int, int]] = None
         self._preview_base_image: Optional[Image.Image] = None
         self._preview_photo: Optional[ImageTk.PhotoImage] = None
+        self._grid_var = tk.BooleanVar(value=False)
+        self._preview_zoom = 1.0
+        self._preview_offset = (0, 0)
+        self._pan_start: Optional[tuple[int, int]] = None
+        self._pan_origin = (0, 0)
+        self._preview_scaled_size: Optional[tuple[int, int]] = None
+        self._preview_box_size: Optional[tuple[int, int]] = None
+        self._preview_display_size: Optional[tuple[int, int]] = None
 
         window = tk.Toplevel(parent)
         window.title("色使用一覧")
@@ -53,7 +62,8 @@ class ColorUsageWindow:
 
         preview_frame = ttk.LabelFrame(container, text="選択色プレビュー")
         preview_frame.grid(row=0, column=1, padx=(8, 0), sticky="nsew")
-        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=0)
+        preview_frame.rowconfigure(1, weight=1)
         preview_frame.columnconfigure(0, weight=1)
 
         style = ttk.Style(window)
@@ -82,9 +92,23 @@ class ColorUsageWindow:
         tree.grid(row=0, column=0, sticky="nsew")
         vscroll.grid(row=0, column=1, sticky="ns")
 
+        grid_toggle = ttk.Checkbutton(
+            preview_frame,
+            text="グリッド表示",
+            variable=self._grid_var,
+            command=self._on_grid_toggle,
+        )
+        grid_toggle.grid(row=0, column=0, sticky="w", padx=4, pady=(4, 0))
+
         preview_label = ttk.Label(preview_frame, text="色を選択してください", anchor="center")
-        preview_label.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        preview_label.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
         preview_frame.bind("<Configure>", self._on_preview_resize)
+        preview_label.bind("<MouseWheel>", self._on_preview_wheel)
+        preview_label.bind("<Button-4>", self._on_preview_wheel)
+        preview_label.bind("<Button-5>", self._on_preview_wheel)
+        preview_label.bind("<ButtonPress-2>", self._on_preview_pan_start)
+        preview_label.bind("<B2-Motion>", self._on_preview_pan_move)
+        preview_label.bind("<ButtonRelease-2>", self._on_preview_pan_end)
 
         self._tree = tree
         self._preview_label = preview_label
@@ -147,8 +171,10 @@ class ColorUsageWindow:
 
     def _notify_selection(self, rgb: Optional[tuple[int, int, int]]) -> None:
         """選択色をコールバックへ渡す。"""
+        self._selected_rgb = rgb
         if self._on_select:
             self._on_select(rgb)
+        self._render_preview()
 
     def _render_rows(self) -> None:
         """Treeviewの内容を再描画する。"""
@@ -209,10 +235,126 @@ class ColorUsageWindow:
         """プレビュー枠のサイズ変更に合わせて再描画する。"""
         self._render_preview()
 
+    def _on_grid_toggle(self) -> None:
+        """グリッド表示の切り替えを反映する。"""
+        self._render_preview()
+
+    def _on_preview_pan_start(self, event: tk.Event) -> None:
+        """ホイールクリックでドラッグ移動を開始する。"""
+        if self._preview_base_image is None:
+            return
+        scaled = self._preview_scaled_size
+        display = self._preview_display_size
+        if not scaled or not display:
+            return
+        if scaled[0] <= display[0] and scaled[1] <= display[1]:
+            return
+        self._pan_start = (int(event.x), int(event.y))
+        self._pan_origin = self._preview_offset
+
+    def _on_preview_pan_move(self, event: tk.Event) -> None:
+        """ドラッグ量に応じて表示位置を動かす。"""
+        if self._preview_base_image is None or self._pan_start is None:
+            return
+        scaled = self._preview_scaled_size
+        display = self._preview_display_size
+        if not scaled or not display:
+            return
+        dx = int(event.x) - self._pan_start[0]
+        dy = int(event.y) - self._pan_start[1]
+        new_x = self._pan_origin[0] - dx
+        new_y = self._pan_origin[1] - dy
+        self._preview_offset = self._clamp_preview_offset((new_x, new_y), scaled, display)
+        self._render_preview()
+
+    def _on_preview_pan_end(self, _event: tk.Event) -> None:
+        """ドラッグ終了時の後始末。"""
+        self._pan_start = None
+
+    def _on_preview_wheel(self, event: tk.Event) -> None:
+        """プレビューの拡大縮小（等倍未満は許可しない）。"""
+        if self._preview_base_image is None:
+            return
+        delta = 0
+        if getattr(event, "delta", 0):
+            delta = int(event.delta)
+        elif getattr(event, "num", None) == 4:
+            delta = 120
+        elif getattr(event, "num", None) == 5:
+            delta = -120
+        if delta == 0:
+            return
+        factor = 1.1
+        if delta > 0:
+            self._preview_zoom *= factor
+        else:
+            self._preview_zoom /= factor
+        # 等倍を下限としてクランプする
+        if self._preview_zoom < 1.0:
+            self._preview_zoom = 1.0
+        self._render_preview()
+
+    def _clamp_preview_offset(
+        self,
+        offset: tuple[int, int],
+        scaled_size: tuple[int, int],
+        display_size: tuple[int, int],
+    ) -> tuple[int, int]:
+        """表示範囲のはみ出しを防ぐ。"""
+        max_x = max(0, int(scaled_size[0] - display_size[0]))
+        max_y = max(0, int(scaled_size[1] - display_size[1]))
+        x = min(max(int(offset[0]), 0), max_x)
+        y = min(max(int(offset[1]), 0), max_y)
+        return (x, y)
+
+    def _get_grid_line_color(self) -> tuple[int, int, int, int]:
+        """選択色の明るさからグリッド線の色を決める。"""
+        if self._selected_rgb is None:
+            return (0, 0, 0, 90)
+        r, g, b = (int(self._selected_rgb[0]), int(self._selected_rgb[1]), int(self._selected_rgb[2]))
+        # 選択色が暗いほど線を明るく、明るいほど線を暗くする
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        tone = int(round(255 - luminance))
+        tone = max(0, min(255, tone))
+        return (tone, tone, tone, 120)
+
+    def _apply_grid_overlay(self, image: Image.Image, source_size: tuple[int, int]) -> Image.Image:
+        """プレビュー画像にグリッドを重ねる。"""
+        src_w, src_h = source_size
+        if src_w <= 1 or src_h <= 1:
+            return image
+        base = image.convert("RGBA")
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        # 半透明ラインで色を邪魔しすぎないようにする
+        line_color = self._get_grid_line_color()
+        dst_w, dst_h = base.size
+        step_x = dst_w / src_w
+        step_y = dst_h / src_h
+        last_x = None
+        for i in range(1, src_w):
+            x = int(round(i * step_x))
+            if x <= 0 or x >= dst_w or x == last_x:
+                continue
+            draw.line([(x, 0), (x, dst_h)], fill=line_color)
+            last_x = x
+        last_y = None
+        for i in range(1, src_h):
+            y = int(round(i * step_y))
+            if y <= 0 or y >= dst_h or y == last_y:
+                continue
+            draw.line([(0, y), (dst_w, y)], fill=line_color)
+            last_y = y
+        return Image.alpha_composite(base, overlay)
+
     def _render_preview(self) -> None:
         """プレビュー表示を更新する。"""
         if self._preview_base_image is None:
             self._preview_photo = None
+            self._preview_scaled_size = None
+            self._preview_box_size = None
+            self._preview_display_size = None
+            self._preview_offset = (0, 0)
             self._preview_label.configure(text="色を選択してください", image="")
             return
         label = self._preview_label
@@ -220,9 +362,30 @@ class ColorUsageWindow:
         box_w = label.winfo_width() or label.winfo_reqwidth() or 200
         box_h = label.winfo_height() or label.winfo_reqheight() or 200
         img_w, img_h = self._preview_base_image.size
-        scale = min(box_w / img_w, box_h / img_h)
-        scale = max(scale, 0.01)
+        base_scale = min(box_w / img_w, box_h / img_h)
+        base_scale = max(base_scale, 0.01)
+        # 等倍（現状のフィット倍率）を下限にして拡大のみ許可する
+        scale = base_scale * max(self._preview_zoom, 1.0)
         new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
         resized = self._preview_base_image.resize(new_size, Image.Resampling.NEAREST)
-        self._preview_photo = ImageTk.PhotoImage(resized)
+        if self._grid_var.get():
+            resized = self._apply_grid_overlay(resized, (img_w, img_h))
+        resized_w, resized_h = resized.size
+        display_w = min(resized_w, box_w)
+        display_h = min(resized_h, box_h)
+        self._preview_scaled_size = (resized_w, resized_h)
+        self._preview_box_size = (box_w, box_h)
+        self._preview_display_size = (display_w, display_h)
+        self._preview_offset = self._clamp_preview_offset(
+            self._preview_offset,
+            (resized_w, resized_h),
+            (display_w, display_h),
+        )
+        # 拡大時は切り出しでパン表示する
+        if resized_w > display_w or resized_h > display_h:
+            off_x, off_y = self._preview_offset
+            display_img = resized.crop((off_x, off_y, off_x + display_w, off_y + display_h))
+        else:
+            display_img = resized
+        self._preview_photo = ImageTk.PhotoImage(display_img)
         self._preview_label.configure(image=self._preview_photo, text="")
