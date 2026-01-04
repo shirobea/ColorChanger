@@ -53,7 +53,11 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.last_settings: Optional[dict] = None
         self._pending_settings: Optional[dict] = None
         self.color_usage: list[dict] = []
+        self._color_usage_base_image: Optional[np.ndarray] = None
         self._color_usage_window = None
+        self._color_usage_selected_rgb: Optional[tuple[int, int, int]] = None
+        self.color_usage_tone_var = tk.DoubleVar(value=0.85)
+        self.color_usage_tone_display = tk.StringVar(value="")
         self.diff_var = tk.StringVar(value="")
         self.physical_size_var = tk.StringVar(value="完成サイズ: 幅・高さを入力してください")
         self.plate_requirement_var = tk.StringVar(value="28×28プレート: 幅・高さを入力してください")
@@ -86,6 +90,8 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._showing_prev: bool = False
         self._showing_input_overlay: bool = False
         self._runner = ConversionRunner(self._schedule_on_ui, lambda: self._closing)
+        self.color_usage_tone_var.trace_add("write", lambda *_: self._on_color_usage_tone_change())
+        self._on_color_usage_tone_change()
 
         self._load_settings()
         self._build_layout()

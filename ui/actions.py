@@ -63,8 +63,7 @@ class ActionsMixin:
         self.output_pil = None
         self.output_image = None
         self.color_usage = []
-        self._set_color_usage_button_state(False)
-        self._refresh_color_usage_window(reset_sort=False)
+        self._color_usage_base_image = None
         # 入力を変えたら前回出力のプレビューは破棄してブレンド表示の混在を防ぐ
         self.prev_output_pil = None
         self._showing_prev = False
@@ -73,7 +72,11 @@ class ActionsMixin:
         self.output_canvas.configure(image="", text="変換後")
         self._set_initial_target_size(image)
         self._refresh_previews()
-        self.rgb_log_var.set("入力画像を読み込みました。RGB最適化を行う場合はボタンを押してください。")
+        matched = self._update_color_usage_from_input(image)
+        base_msg = "入力画像を読み込みました。RGB最適化を行う場合はボタンを押してください。"
+        if matched:
+            base_msg = "入力画像を読み込みました。パレット内の色のみのため色使用一覧を開けます。RGB最適化を行う場合はボタンを押してください。"
+        self.rgb_log_var.set(base_msg)
 
     def _sanitize_kernel_size(self: "BeadsApp", raw_size: object) -> int:
         """メディアン用カーネルサイズを奇数・下限付きで整える。"""
@@ -341,6 +344,50 @@ class ActionsMixin:
         rows.sort(key=lambda r: int(r.get("count", 0)), reverse=True)
         return rows
 
+    def _analyze_palette_usage(self: "BeadsApp", image: np.ndarray) -> tuple[bool, list[dict]]:
+        """入力画像がパレット内の色だけか確認し、色使用一覧を作成する。"""
+        if image is None or image.ndim != 3 or image.shape[2] != 3:
+            return False, []
+        palette_map: dict[tuple[int, int, int], dict[str, str]] = {}
+        for color in self.palette:
+            rgb = tuple(int(round(v)) for v in color.rgb)
+            palette_map[rgb] = {"color_id": color.color_id, "name": color.name}
+        flat = image.reshape(-1, 3)
+        colors, counts = np.unique(flat, axis=0, return_counts=True)
+        rows: list[dict] = []
+        for rgb_arr, count in zip(colors, counts):
+            rgb = (int(rgb_arr[0]), int(rgb_arr[1]), int(rgb_arr[2]))
+            info = palette_map.get(rgb)
+            if not info:
+                # パレット外の色が含まれている場合は不一致として扱う
+                return False, []
+            rows.append(
+                {
+                    "color_id": info["color_id"],
+                    "name": info["name"],
+                    "count": int(count),
+                    "rgb": rgb,
+                }
+            )
+        rows.sort(key=lambda r: int(r.get("count", 0)), reverse=True)
+        return True, rows
+
+    def _update_color_usage_from_input(self: "BeadsApp", image: Image.Image) -> bool:
+        """入力画像がパレット色のみなら色使用一覧を有効化する。"""
+        input_array = np.asarray(image, dtype=np.uint8)
+        matched, rows = self._analyze_palette_usage(input_array)
+        if not matched:
+            self.color_usage = []
+            self._color_usage_base_image = None
+            self._set_color_usage_button_state(False)
+            self._refresh_color_usage_window(reset_sort=False)
+            return False
+        self.color_usage = rows
+        self._color_usage_base_image = input_array
+        self._set_color_usage_button_state(bool(rows))
+        self._refresh_color_usage_window(reset_sort=True)
+        return True
+
     def _refresh_color_usage_window(self: "BeadsApp", reset_sort: bool) -> None:
         """色使用一覧ウィンドウが開いている場合のみ更新する。"""
         window = getattr(self, "_color_usage_window", None)
@@ -355,19 +402,27 @@ class ActionsMixin:
 
     def _make_color_usage_preview(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> Optional[Image.Image]:
         """選択色以外を薄くしたプレビュー画像を作る。"""
-        if self.output_image is None or not self.color_usage:
+        base_image = self._color_usage_base_image if self._color_usage_base_image is not None else self.output_image
+        if base_image is None or not self.color_usage:
             return None
-        base = np.asarray(self.output_image, dtype=np.uint8)
+        base = np.asarray(base_image, dtype=np.uint8)
         if rgb is None:
             return Image.fromarray(base)
         target = np.array(rgb, dtype=np.uint8)
         mask = np.all(base == target, axis=2)
         if not mask.any():
             return Image.fromarray(base)
-        # 選択していない色は白に寄せて薄く見せる
-        dim_ratio = 0.15
-        dim = base.astype(np.float32) * dim_ratio + 255.0 * (1.0 - dim_ratio)
-        dim = dim.astype(np.uint8)
+        # 非選択色はスライダー値で白寄せ/黒寄せする
+        tone = float(self.color_usage_tone_var.get())
+        tone = max(-1.0, min(1.0, tone))
+        base_float = base.astype(np.float32)
+        if tone >= 0:
+            mix = tone
+            adjusted = base_float * (1.0 - mix) + 255.0 * mix
+        else:
+            mix = -tone
+            adjusted = base_float * (1.0 - mix)
+        dim = np.clip(adjusted, 0, 255).astype(np.uint8)
         result = base.copy()
         result[~mask] = dim[~mask]
         return Image.fromarray(result)
@@ -378,7 +433,24 @@ class ActionsMixin:
 
     def _on_color_usage_select(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> None:
         """色使用一覧で選択された色に合わせてプレビューを更新する。"""
+        self._color_usage_selected_rgb = rgb
         self._update_color_usage_preview(rgb)
+
+    def _on_color_usage_tone_change(self: "BeadsApp") -> None:
+        """非選択色の明暗調整を表示とプレビューに反映する。"""
+        value = float(self.color_usage_tone_var.get())
+        clamped = max(-1.0, min(1.0, value))
+        if clamped != value:
+            self.color_usage_tone_var.set(clamped)
+        percent = int(round(abs(clamped) * 100))
+        if clamped > 0:
+            label = f"白寄せ {percent}%"
+        elif clamped < 0:
+            label = f"黒寄せ {percent}%"
+        else:
+            label = "変更なし"
+        self.color_usage_tone_display.set(label)
+        self._update_color_usage_preview(self._color_usage_selected_rgb)
 
     def show_color_usage(self: "BeadsApp") -> None:
         """色使用一覧ウィンドウを開く。"""
@@ -394,6 +466,8 @@ class ActionsMixin:
             self.color_usage,
             on_close=self._on_color_usage_window_closed,
             on_select=self._on_color_usage_select,
+            dim_var=self.color_usage_tone_var,
+            dim_display_var=self.color_usage_tone_display,
         )
         self._update_color_usage_preview(None)
 
@@ -413,6 +487,7 @@ class ActionsMixin:
         self.prev_settings = self.last_settings
         self._showing_prev = False
         self.output_image = result
+        self._color_usage_base_image = result
         self.output_pil = Image.fromarray(result)
         self.color_usage = self._build_color_usage_rows(result, self._pending_settings)
         self._set_color_usage_button_state(bool(self.color_usage))
@@ -493,6 +568,9 @@ class ActionsMixin:
             self.output_path = None
             self.diff_var.set("")
             self.color_usage = []
+            self._color_usage_base_image = None
+        elif self.output_image is not None:
+            self._color_usage_base_image = self.output_image
         self._pending_settings = None
         self._reset_progress_display()
         self._restore_convert_button()
@@ -500,7 +578,7 @@ class ActionsMixin:
             self.save_button.configure(state="normal" if self.output_image is not None else "disabled")
         else:
             self.save_button.configure(state="disabled")
-        self._set_color_usage_button_state(bool(self.output_image is not None and self.color_usage))
+        self._set_color_usage_button_state(bool(self.color_usage and self._color_usage_base_image is not None))
         self._refresh_color_usage_window(reset_sort=False)
         if clear_canvas and not preserve_output:
             self.output_canvas.configure(image="", text="変換後")

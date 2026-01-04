@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable, Optional
+from collections import OrderedDict
 
 import tkinter as tk
 from tkinter import ttk
@@ -18,6 +19,8 @@ class ColorUsageWindow:
         rows: list[dict],
         on_close: Optional[Callable[[], None]] = None,
         on_select: Optional[Callable[[Optional[tuple[int, int, int]]], None]] = None,
+        dim_var: Optional[tk.DoubleVar] = None,
+        dim_display_var: Optional[tk.StringVar] = None,
     ) -> None:
         self._parent = parent
         self._on_close = on_close
@@ -31,13 +34,24 @@ class ColorUsageWindow:
         self._preview_base_image: Optional[Image.Image] = None
         self._preview_photo: Optional[ImageTk.PhotoImage] = None
         self._grid_var = tk.BooleanVar(value=False)
+        self._dim_var = dim_var
+        self._dim_display_var = dim_display_var
         self._preview_zoom = 1.0
-        self._preview_offset = (0, 0)
-        self._pan_start: Optional[tuple[int, int]] = None
-        self._pan_origin = (0, 0)
-        self._preview_scaled_size: Optional[tuple[int, int]] = None
-        self._preview_box_size: Optional[tuple[int, int]] = None
-        self._preview_display_size: Optional[tuple[int, int]] = None
+        self._preview_canvas: Optional[tk.Canvas] = None
+        self._preview_image_item: Optional[int] = None
+        self._preview_text_item: Optional[int] = None
+        self._preview_scale = 1.0
+        self._preview_image_pos = (0.0, 0.0)
+        self._preview_region_size = (0, 0)
+        self._preview_render_job: Optional[str] = None
+        self._preview_zoom_anchor: Optional[tuple[float, float, float, float]] = None
+        self._preview_cache: OrderedDict[tuple, ImageTk.PhotoImage] = OrderedDict()
+        self._preview_cache_limit = 8
+        self._preview_grid_suspended = False
+        self._preview_grid_deferred_job: Optional[str] = None
+        self._preview_grid_delay_ms = 120
+        self._preview_box_size = (0, 0)
+        self._preview_zoom_step = 0.01
 
         window = tk.Toplevel(parent)
         window.title("色使用一覧")
@@ -63,7 +77,11 @@ class ColorUsageWindow:
         preview_frame = ttk.LabelFrame(container, text="選択色プレビュー")
         preview_frame.grid(row=0, column=1, padx=(8, 0), sticky="nsew")
         preview_frame.rowconfigure(0, weight=0)
-        preview_frame.rowconfigure(1, weight=1)
+        if self._dim_var is None:
+            preview_frame.rowconfigure(1, weight=1)
+        else:
+            preview_frame.rowconfigure(1, weight=0)
+            preview_frame.rowconfigure(2, weight=1)
         preview_frame.columnconfigure(0, weight=1)
 
         style = ttk.Style(window)
@@ -100,20 +118,63 @@ class ColorUsageWindow:
         )
         grid_toggle.grid(row=0, column=0, sticky="w", padx=4, pady=(4, 0))
 
-        preview_label = ttk.Label(preview_frame, text="色を選択してください", anchor="center")
-        preview_label.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        preview_frame.bind("<Configure>", self._on_preview_resize)
-        preview_label.bind("<MouseWheel>", self._on_preview_wheel)
-        preview_label.bind("<Button-4>", self._on_preview_wheel)
-        preview_label.bind("<Button-5>", self._on_preview_wheel)
-        preview_label.bind("<ButtonPress-2>", self._on_preview_pan_start)
-        preview_label.bind("<B2-Motion>", self._on_preview_pan_move)
-        preview_label.bind("<ButtonRelease-2>", self._on_preview_pan_end)
+        preview_row = 1
+        if self._dim_var is not None:
+            tone_frame = ttk.Frame(preview_frame)
+            tone_frame.grid(row=1, column=0, sticky="we", padx=4, pady=(4, 0))
+            tone_frame.columnconfigure(1, weight=1)
+            ttk.Label(tone_frame, text="非選択色の明暗").grid(row=0, column=0, padx=(0, 4), sticky="w")
+            tone_scale = ttk.Scale(
+                tone_frame,
+                from_=-1.0,
+                to=1.0,
+                orient="horizontal",
+                variable=self._dim_var,
+                length=160,
+            )
+            tone_scale.grid(row=0, column=1, sticky="we")
+            tone_scale.bind("<Button-1>", self._on_tone_pointer)
+            tone_scale.bind("<B1-Motion>", self._on_tone_pointer)
+            if self._dim_display_var is not None:
+                ttk.Label(tone_frame, textvariable=self._dim_display_var, width=10, anchor="e").grid(
+                    row=0,
+                    column=2,
+                    padx=(4, 0),
+                    sticky="e",
+                )
+            preview_row = 2
+
+        preview_canvas = tk.Canvas(preview_frame, highlightthickness=0)
+        preview_canvas.grid(row=preview_row, column=0, sticky="nsew", padx=4, pady=4)
+        preview_canvas.bind("<Configure>", self._on_preview_resize)
+        preview_canvas.bind("<MouseWheel>", self._on_preview_wheel)
+        preview_canvas.bind("<Button-4>", self._on_preview_wheel)
+        preview_canvas.bind("<Button-5>", self._on_preview_wheel)
+        preview_canvas.bind("<ButtonPress-3>", self._on_preview_pan_start)
+        preview_canvas.bind("<B3-Motion>", self._on_preview_pan_move)
+        preview_canvas.bind("<ButtonRelease-3>", self._on_preview_pan_end)
 
         self._tree = tree
-        self._preview_label = preview_label
+        self._preview_canvas = preview_canvas
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.update_rows(rows, reset_sort=True)
+
+    def _on_tone_pointer(self, event: tk.Event) -> str:
+        """クリック位置に合わせてスライダー値を動かす。"""
+        return self._set_scale_by_pointer(event)
+
+    def _set_scale_by_pointer(self, event: tk.Event) -> str:
+        """クリック位置に合わせて値を設定する。"""
+        # クリック位置を比率に換算してスライダーの値を更新する
+        scale: ttk.Scale = event.widget  # type: ignore[assignment]
+        width = max(1, scale.winfo_width())
+        fraction = max(0.0, min(1.0, event.x / width))
+        min_val = float(scale.cget("from"))
+        max_val = float(scale.cget("to"))
+        new_val = min_val + (max_val - min_val) * fraction
+        if self._dim_var is not None:
+            self._dim_var.set(new_val)
+        return "break"
 
     def is_alive(self) -> bool:
         """ウィンドウが生きているかを判定する。"""
@@ -228,48 +289,57 @@ class ColorUsageWindow:
 
     def set_preview_image(self, image: Optional[Image.Image]) -> None:
         """プレビュー用画像を更新する。"""
+        if image is not self._preview_base_image:
+            self._preview_cache.clear()
+            self._preview_grid_suspended = False
+            if self._preview_grid_deferred_job is not None and self._preview_canvas is not None:
+                try:
+                    self._preview_canvas.after_cancel(self._preview_grid_deferred_job)
+                except Exception:
+                    pass
+                self._preview_grid_deferred_job = None
         self._preview_base_image = image
         self._render_preview()
 
     def _on_preview_resize(self, _event: tk.Event) -> None:
         """プレビュー枠のサイズ変更に合わせて再描画する。"""
+        canvas = self._preview_canvas
+        if canvas is not None:
+            self._preview_box_size = (max(1, canvas.winfo_width()), max(1, canvas.winfo_height()))
         self._render_preview()
 
     def _on_grid_toggle(self) -> None:
         """グリッド表示の切り替えを反映する。"""
+        self._preview_grid_suspended = False
+        if self._preview_grid_deferred_job is not None and self._preview_canvas is not None:
+            try:
+                self._preview_canvas.after_cancel(self._preview_grid_deferred_job)
+            except Exception:
+                pass
+            self._preview_grid_deferred_job = None
         self._render_preview()
 
     def _on_preview_pan_start(self, event: tk.Event) -> None:
-        """ホイールクリックでドラッグ移動を開始する。"""
+        """右クリックドラッグで移動を開始する。"""
         if self._preview_base_image is None:
             return
-        scaled = self._preview_scaled_size
-        display = self._preview_display_size
-        if not scaled or not display:
+        canvas = self._preview_canvas
+        if canvas is None:
             return
-        if scaled[0] <= display[0] and scaled[1] <= display[1]:
-            return
-        self._pan_start = (int(event.x), int(event.y))
-        self._pan_origin = self._preview_offset
+        canvas.scan_mark(event.x, event.y)
 
     def _on_preview_pan_move(self, event: tk.Event) -> None:
         """ドラッグ量に応じて表示位置を動かす。"""
-        if self._preview_base_image is None or self._pan_start is None:
+        if self._preview_base_image is None:
             return
-        scaled = self._preview_scaled_size
-        display = self._preview_display_size
-        if not scaled or not display:
+        canvas = self._preview_canvas
+        if canvas is None:
             return
-        dx = int(event.x) - self._pan_start[0]
-        dy = int(event.y) - self._pan_start[1]
-        new_x = self._pan_origin[0] - dx
-        new_y = self._pan_origin[1] - dy
-        self._preview_offset = self._clamp_preview_offset((new_x, new_y), scaled, display)
-        self._render_preview()
+        canvas.scan_dragto(event.x, event.y, gain=1)
 
     def _on_preview_pan_end(self, _event: tk.Event) -> None:
         """ドラッグ終了時の後始末。"""
-        self._pan_start = None
+        return None
 
     def _on_preview_wheel(self, event: tk.Event) -> None:
         """プレビューの拡大縮小（等倍未満は許可しない）。"""
@@ -284,28 +354,124 @@ class ColorUsageWindow:
             delta = -120
         if delta == 0:
             return
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        box_w, box_h = self._get_preview_box_size()
+        img_w, img_h = self._preview_base_image.size
+        base_scale = min(box_w / img_w, box_h / img_h)
+        base_scale = max(base_scale, 0.01)
+        old_zoom = self._preview_zoom
+        old_scale = base_scale * max(old_zoom, 1.0)
+        old_scaled_w = max(1, int(img_w * old_scale))
+        old_scaled_h = max(1, int(img_h * old_scale))
+        old_pos_x = 0.0 if old_scaled_w >= box_w else (box_w - old_scaled_w) / 2
+        old_pos_y = 0.0 if old_scaled_h >= box_h else (box_h - old_scaled_h) / 2
+        # マウス位置を中心に拡大縮小するための基準座標を求める
+        cursor_canvas_x = float(canvas.canvasx(event.x))
+        cursor_canvas_y = float(canvas.canvasy(event.y))
+        base_x = (cursor_canvas_x - old_pos_x) / old_scale
+        base_y = (cursor_canvas_y - old_pos_y) / old_scale
+        base_x = min(max(base_x, 0.0), float(img_w))
+        base_y = min(max(base_y, 0.0), float(img_h))
+
         factor = 1.1
         if delta > 0:
-            self._preview_zoom *= factor
+            new_zoom = old_zoom * factor
         else:
-            self._preview_zoom /= factor
+            new_zoom = old_zoom / factor
         # 等倍を下限としてクランプする
-        if self._preview_zoom < 1.0:
-            self._preview_zoom = 1.0
+        if new_zoom < 1.0:
+            new_zoom = 1.0
+        # 倍率を丸めて不要な再計算を減らす
+        step = max(self._preview_zoom_step, 0.001)
+        new_zoom = round(new_zoom / step) * step
+        if new_zoom < 1.0:
+            new_zoom = 1.0
+        if new_zoom == old_zoom:
+            return
+        self._preview_zoom = new_zoom
+        # 連続スクロール中は描画を間引いて最後にまとめて更新する
+        self._preview_zoom_anchor = (base_x, base_y, float(event.x), float(event.y))
+        if self._grid_var.get():
+            # グリッドは後から描き直して負荷を抑える
+            self._preview_grid_suspended = True
+            if self._preview_grid_deferred_job is not None:
+                try:
+                    canvas.after_cancel(self._preview_grid_deferred_job)
+                except Exception:
+                    pass
+            self._preview_grid_deferred_job = canvas.after(
+                self._preview_grid_delay_ms, self._flush_grid_overlay
+            )
+        if self._preview_render_job is not None:
+            try:
+                canvas.after_cancel(self._preview_render_job)
+            except Exception:
+                pass
+        self._preview_render_job = canvas.after(16, self._flush_preview_zoom)
+
+    def _flush_preview_zoom(self) -> None:
+        """ホイール操作の描画をまとめて実行する。"""
+        canvas = self._preview_canvas
+        if canvas is None:
+            self._preview_render_job = None
+            self._preview_zoom_anchor = None
+            return
+        self._preview_render_job = None
+        anchor = self._preview_zoom_anchor
+        self._render_preview()
+        if self._preview_base_image is None:
+            self._preview_zoom_anchor = None
+            return
+        if not anchor:
+            return
+        self._preview_zoom_anchor = None
+        box_w, box_h = self._get_preview_box_size()
+        base_x, base_y, event_x, event_y = anchor
+        new_scale = self._preview_scale
+        new_pos_x, new_pos_y = self._preview_image_pos
+        region_w, region_h = self._preview_region_size
+        if region_w > box_w:
+            view_x0 = new_pos_x + base_x * new_scale - event_x
+            max_x0 = float(region_w - box_w)
+            view_x0 = min(max(view_x0, 0.0), max_x0)
+            canvas.xview_moveto(view_x0 / float(region_w))
+        else:
+            canvas.xview_moveto(0)
+        if region_h > box_h:
+            view_y0 = new_pos_y + base_y * new_scale - event_y
+            max_y0 = float(region_h - box_h)
+            view_y0 = min(max(view_y0, 0.0), max_y0)
+            canvas.yview_moveto(view_y0 / float(region_h))
+        else:
+            canvas.yview_moveto(0)
+
+    def _flush_grid_overlay(self) -> None:
+        """スクロール終了後にグリッドを描き直す。"""
+        canvas = self._preview_canvas
+        self._preview_grid_deferred_job = None
+        if canvas is None:
+            self._preview_grid_suspended = False
+            return
+        if not self._grid_var.get():
+            self._preview_grid_suspended = False
+            return
+        self._preview_grid_suspended = False
         self._render_preview()
 
-    def _clamp_preview_offset(
-        self,
-        offset: tuple[int, int],
-        scaled_size: tuple[int, int],
-        display_size: tuple[int, int],
-    ) -> tuple[int, int]:
-        """表示範囲のはみ出しを防ぐ。"""
-        max_x = max(0, int(scaled_size[0] - display_size[0]))
-        max_y = max(0, int(scaled_size[1] - display_size[1]))
-        x = min(max(int(offset[0]), 0), max_x)
-        y = min(max(int(offset[1]), 0), max_y)
-        return (x, y)
+    def _get_preview_box_size(self) -> tuple[int, int]:
+        """プレビュー枠のサイズをキャッシュから取得する。"""
+        box_w, box_h = self._preview_box_size
+        if box_w > 0 and box_h > 0:
+            return box_w, box_h
+        canvas = self._preview_canvas
+        if canvas is None:
+            return (200, 200)
+        box_w = canvas.winfo_width() or canvas.winfo_reqwidth() or 200
+        box_h = canvas.winfo_height() or canvas.winfo_reqheight() or 200
+        self._preview_box_size = (box_w, box_h)
+        return box_w, box_h
 
     def _get_grid_line_color(self) -> tuple[int, int, int, int]:
         """選択色の明るさからグリッド線の色を決める。"""
@@ -347,45 +513,88 @@ class ColorUsageWindow:
             last_y = y
         return Image.alpha_composite(base, overlay)
 
+    def _get_cached_preview_photo(self, key: tuple) -> Optional[ImageTk.PhotoImage]:
+        """プレビュー画像のキャッシュを参照する。"""
+        photo = self._preview_cache.get(key)
+        if photo is not None:
+            self._preview_cache.move_to_end(key)
+        return photo
+
+    def _store_preview_cache(self, key: tuple, photo: ImageTk.PhotoImage) -> None:
+        """プレビュー画像のキャッシュを更新する。"""
+        self._preview_cache[key] = photo
+        self._preview_cache.move_to_end(key)
+        while len(self._preview_cache) > self._preview_cache_limit:
+            # 古いキャッシュを捨ててメモリ増加を抑える
+            self._preview_cache.popitem(last=False)
+
     def _render_preview(self) -> None:
         """プレビュー表示を更新する。"""
-        if self._preview_base_image is None:
-            self._preview_photo = None
-            self._preview_scaled_size = None
-            self._preview_box_size = None
-            self._preview_display_size = None
-            self._preview_offset = (0, 0)
-            self._preview_label.configure(text="色を選択してください", image="")
+        canvas = self._preview_canvas
+        if canvas is None:
             return
-        label = self._preview_label
-        label.update_idletasks()
-        box_w = label.winfo_width() or label.winfo_reqwidth() or 200
-        box_h = label.winfo_height() or label.winfo_reqheight() or 200
+        box_w, box_h = self._get_preview_box_size()
+        if self._preview_base_image is None:
+            if self._preview_image_item is not None:
+                canvas.delete(self._preview_image_item)
+                self._preview_image_item = None
+            self._preview_photo = None
+            if self._preview_text_item is None:
+                self._preview_text_item = canvas.create_text(
+                    box_w / 2,
+                    box_h / 2,
+                    text="色を選択してください",
+                )
+            else:
+                canvas.itemconfig(self._preview_text_item, text="色を選択してください")
+                canvas.coords(self._preview_text_item, box_w / 2, box_h / 2)
+            canvas.configure(scrollregion=(0, 0, box_w, box_h))
+            canvas.xview_moveto(0)
+            canvas.yview_moveto(0)
+            self._preview_scale = 1.0
+            self._preview_image_pos = (0.0, 0.0)
+            self._preview_region_size = (box_w, box_h)
+            return
+        if self._preview_text_item is not None:
+            canvas.delete(self._preview_text_item)
+            self._preview_text_item = None
         img_w, img_h = self._preview_base_image.size
         base_scale = min(box_w / img_w, box_h / img_h)
         base_scale = max(base_scale, 0.01)
         # 等倍（現状のフィット倍率）を下限にして拡大のみ許可する
         scale = base_scale * max(self._preview_zoom, 1.0)
         new_size = (max(1, int(img_w * scale)), max(1, int(img_h * scale)))
-        resized = self._preview_base_image.resize(new_size, Image.Resampling.NEAREST)
-        if self._grid_var.get():
-            resized = self._apply_grid_overlay(resized, (img_w, img_h))
-        resized_w, resized_h = resized.size
-        display_w = min(resized_w, box_w)
-        display_h = min(resized_h, box_h)
-        self._preview_scaled_size = (resized_w, resized_h)
-        self._preview_box_size = (box_w, box_h)
-        self._preview_display_size = (display_w, display_h)
-        self._preview_offset = self._clamp_preview_offset(
-            self._preview_offset,
-            (resized_w, resized_h),
-            (display_w, display_h),
-        )
-        # 拡大時は切り出しでパン表示する
-        if resized_w > display_w or resized_h > display_h:
-            off_x, off_y = self._preview_offset
-            display_img = resized.crop((off_x, off_y, off_x + display_w, off_y + display_h))
+        grid_on = self._grid_var.get() and not self._preview_grid_suspended
+        line_color = self._get_grid_line_color() if grid_on else None
+        cache_key = (id(self._preview_base_image), img_w, img_h, new_size, grid_on, line_color)
+        photo = self._get_cached_preview_photo(cache_key)
+        if photo is None:
+            resized = self._preview_base_image.resize(new_size, Image.Resampling.NEAREST)
+            if grid_on:
+                resized = self._apply_grid_overlay(resized, (img_w, img_h))
+            photo = ImageTk.PhotoImage(resized)
+            self._store_preview_cache(cache_key, photo)
+        resized_w, resized_h = new_size
+        pos_x = 0.0 if resized_w >= box_w else (box_w - resized_w) / 2
+        pos_y = 0.0 if resized_h >= box_h else (box_h - resized_h) / 2
+        region_w = max(box_w, resized_w)
+        region_h = max(box_h, resized_h)
+        self._preview_scale = scale
+        self._preview_image_pos = (pos_x, pos_y)
+        self._preview_region_size = (region_w, region_h)
+        self._preview_photo = photo
+        if self._preview_image_item is None:
+            self._preview_image_item = canvas.create_image(
+                pos_x,
+                pos_y,
+                anchor="nw",
+                image=self._preview_photo,
+            )
         else:
-            display_img = resized
-        self._preview_photo = ImageTk.PhotoImage(display_img)
-        self._preview_label.configure(image=self._preview_photo, text="")
+            canvas.itemconfig(self._preview_image_item, image=self._preview_photo)
+            canvas.coords(self._preview_image_item, pos_x, pos_y)
+        canvas.configure(scrollregion=(0, 0, region_w, region_h))
+        if resized_w <= box_w:
+            canvas.xview_moveto(0)
+        if resized_h <= box_h:
+            canvas.yview_moveto(0)
