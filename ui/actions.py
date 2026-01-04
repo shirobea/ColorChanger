@@ -64,6 +64,8 @@ class ActionsMixin:
         self.output_image = None
         self.color_usage = []
         self._color_usage_base_image = None
+        self._all_mode_results = None
+        self._output_grid_photos = []
         # 入力を変えたら前回出力のプレビューは破棄してブレンド表示の混在を防ぐ
         self.prev_output_pil = None
         self._showing_prev = False
@@ -73,9 +75,13 @@ class ActionsMixin:
         self._set_initial_target_size(image)
         self._refresh_previews()
         matched = self._update_color_usage_from_input(image)
+        if self.mode_var.get() == "全て":
+            self._set_color_usage_button_state(False)
         base_msg = "入力画像を読み込みました。RGB最適化を行う場合はボタンを押してください。"
         if matched:
             base_msg = "入力画像を読み込みました。パレット内の色のみのため色使用一覧を開けます。RGB最適化を行う場合はボタンを押してください。"
+        if self.mode_var.get() == "全て":
+            base_msg += " 全てモードでは色使用一覧は利用できません。"
         self.rgb_log_var.set(base_msg)
 
     def _sanitize_kernel_size(self: "BeadsApp", raw_size: object) -> int:
@@ -275,8 +281,18 @@ class ActionsMixin:
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
-        cmc_l = f"{request.cmc_l:.1f}"
-        cmc_c = f"{request.cmc_c:.1f}"
+        if request.mode == "全て":
+            cmc_l = "2.0"
+            cmc_c = "1.0"
+            rgb_weights = [1.0, 1.0, 1.0]
+        else:
+            cmc_l = f"{request.cmc_l:.1f}"
+            cmc_c = f"{request.cmc_c:.1f}"
+            rgb_weights = [
+                round(request.rgb_weights[0], 1),
+                round(request.rgb_weights[1], 1),
+                round(request.rgb_weights[2], 1),
+            ]
         resize_label = {
             "nearest": "ニアレストネイバー",
             "bilinear": "バイリニア",
@@ -290,7 +306,7 @@ class ActionsMixin:
             "CMC l": cmc_l,
             "CMC c": cmc_c,
             "リサイズ方式": resize_label,
-            "RGB重み": [round(request.rgb_weights[0], 1), round(request.rgb_weights[1], 1), round(request.rgb_weights[2], 1)],
+            "RGB重み": rgb_weights,
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
@@ -319,7 +335,7 @@ class ActionsMixin:
         mode = ""
         if settings:
             mode = str(settings.get("モード", ""))
-        if mode.lower() in {"none", "なし"}:
+        if mode.lower() in {"none", "なし", "全て"}:
             return []
         palette_map: dict[tuple[int, int, int], dict[str, str]] = {}
         for color in self.palette:
@@ -344,6 +360,36 @@ class ActionsMixin:
         rows.sort(key=lambda r: int(r.get("count", 0)), reverse=True)
         return rows
 
+    def _get_all_mode_grid_shape(self: "BeadsApp", width: int, height: int) -> tuple[int, int]:
+        """全モード表示の行数・列数を画像比率で切り替える。"""
+        if width <= 0 or height <= 0:
+            return (4, 2)
+        if width >= height:
+            return (4, 2)
+        return (2, 4)
+
+    def _compose_all_mode_image(self: "BeadsApp", results: list[dict]) -> Optional[np.ndarray]:
+        """全モード結果を横長は2列×4行、縦長は2行×4列で合成する。"""
+        if not results:
+            return None
+        images = [entry.get("image") for entry in results if isinstance(entry, dict)]
+        images = [img for img in images if isinstance(img, np.ndarray)]
+        if not images:
+            return None
+        base_h, base_w = images[0].shape[:2]
+        rows, cols = self._get_all_mode_grid_shape(base_w, base_h)
+        canvas = np.zeros((base_h * rows, base_w * cols, 3), dtype=np.uint8)
+        for idx, img in enumerate(images[: rows * cols]):
+            if img.shape[:2] != (base_h, base_w):
+                # サイズが異なる場合は最小限のリサイズを行う
+                img = cv2.resize(img, (base_w, base_h), interpolation=cv2.INTER_NEAREST)
+            row = idx // cols
+            col = idx % cols
+            y0 = row * base_h
+            x0 = col * base_w
+            canvas[y0 : y0 + base_h, x0 : x0 + base_w] = img
+        return canvas
+
     def _analyze_palette_usage(self: "BeadsApp", image: np.ndarray) -> tuple[bool, list[dict]]:
         """入力画像がパレット内の色だけか確認し、色使用一覧を作成する。"""
         if image is None or image.ndim != 3 or image.shape[2] != 3:
@@ -352,14 +398,35 @@ class ActionsMixin:
         for color in self.palette:
             rgb = tuple(int(round(v)) for v in color.rgb)
             palette_map[rgb] = {"color_id": color.color_id, "name": color.name}
+        # パレット外の色が見つかった時点で早期終了する
+        palette_codes = np.array(
+            [
+                (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
+                for rgb in palette_map.keys()
+            ],
+            dtype=np.uint32,
+        )
+        if palette_codes.size == 0:
+            return False, []
         flat = image.reshape(-1, 3)
+        total = flat.shape[0]
+        chunk_size = 200_000
+        for start in range(0, total, chunk_size):
+            chunk = flat[start : start + chunk_size]
+            codes = (
+                (chunk[:, 0].astype(np.uint32) << 16)
+                | (chunk[:, 1].astype(np.uint32) << 8)
+                | chunk[:, 2].astype(np.uint32)
+            )
+            if not np.isin(codes, palette_codes).all():
+                return False, []
+        # 全色が一致した場合のみ色使用一覧を作る
         colors, counts = np.unique(flat, axis=0, return_counts=True)
         rows: list[dict] = []
         for rgb_arr, count in zip(colors, counts):
             rgb = (int(rgb_arr[0]), int(rgb_arr[1]), int(rgb_arr[2]))
             info = palette_map.get(rgb)
             if not info:
-                # パレット外の色が含まれている場合は不一致として扱う
                 return False, []
             rows.append(
                 {
@@ -454,6 +521,9 @@ class ActionsMixin:
 
     def show_color_usage(self: "BeadsApp") -> None:
         """色使用一覧ウィンドウを開く。"""
+        if getattr(self, "_all_mode_results", None):
+            messagebox.showinfo("色使用一覧", "全てモードでは色使用一覧は利用できません。")
+            return
         if not getattr(self, "color_usage", None):
             messagebox.showinfo("色使用一覧", "変換後の色一覧がありません。")
             return
@@ -478,20 +548,44 @@ class ActionsMixin:
         self._start_time = None
         self._reset_progress_display()
 
-    def _on_conversion_success(self: "BeadsApp", result: np.ndarray) -> None:
+    def _on_conversion_success(self: "BeadsApp", result: object) -> None:
         """ワーカースレッド成功時のUI側反映。"""
         if getattr(self, "_closing", False):
             return
         self.output_path = None
-        self.prev_output_pil = self.output_pil
         self.prev_settings = self.last_settings
         self._showing_prev = False
-        self.output_image = result
-        self._color_usage_base_image = result
-        self.output_pil = Image.fromarray(result)
-        self.color_usage = self._build_color_usage_rows(result, self._pending_settings)
-        self._set_color_usage_button_state(bool(self.color_usage))
-        self._refresh_color_usage_window(reset_sort=True)
+        if isinstance(result, list):
+            self.prev_output_pil = None
+            all_results: list[dict] = []
+            for entry in result:
+                if not isinstance(entry, dict):
+                    continue
+                image = entry.get("image")
+                if not isinstance(image, np.ndarray):
+                    continue
+                label = str(entry.get("label", ""))
+                all_results.append(
+                    {"label": label, "image": image, "pil": Image.fromarray(image)}
+                )
+            self._all_mode_results = all_results if all_results else None
+            self._output_grid_photos = []
+            self.output_image = self._compose_all_mode_image(all_results)
+            self.output_pil = Image.fromarray(self.output_image) if self.output_image is not None else None
+            self._color_usage_base_image = None
+            self.color_usage = []
+            self._set_color_usage_button_state(False)
+            self._refresh_color_usage_window(reset_sort=False)
+        else:
+            self.prev_output_pil = self.output_pil
+            self._all_mode_results = None
+            self._output_grid_photos = []
+            self.output_image = result
+            self._color_usage_base_image = result
+            self.output_pil = Image.fromarray(result)
+            self.color_usage = self._build_color_usage_rows(result, self._pending_settings)
+            self._set_color_usage_button_state(bool(self.color_usage))
+            self._refresh_color_usage_window(reset_sort=True)
         self.last_settings = self._pending_settings
         self._pending_settings = None
         self.diff_var.set(self._build_diff_overlay())
@@ -515,7 +609,11 @@ class ActionsMixin:
         self._reset_after_stop(status, clear_canvas=False)
 
     def save_image(self: "BeadsApp") -> None:
-        if self.output_image is None:
+        image_to_save = self.output_image
+        all_results = getattr(self, "_all_mode_results", None)
+        if all_results:
+            image_to_save = self._compose_all_mode_image(all_results)
+        if image_to_save is None:
             self.status_var.set("出力画像がまだありません。")
             return
         initial_dir = str(self.input_image_path.parent) if self.input_image_path else str(Path.cwd())
@@ -533,7 +631,7 @@ class ActionsMixin:
             self.status_var.set("保存をキャンセルしました。")
             return
         try:
-            Image.fromarray(self.output_image).save(path)
+            Image.fromarray(image_to_save).save(path)
             self.output_path = Path(path)
             self.status_var.set("保存しました")
         except Exception as exc:
@@ -565,6 +663,8 @@ class ActionsMixin:
             self.output_image = None
             self.output_pil = None
             self.prev_output_pil = None
+            self._all_mode_results = None
+            self._output_grid_photos = []
             self.output_path = None
             self.diff_var.set("")
             self.color_usage = []

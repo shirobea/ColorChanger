@@ -51,21 +51,37 @@ class ConversionRunner:
 
         def _worker() -> None:
             try:
-                result = converter.convert_image(
-                    input_path=input_path,
-                    input_image=input_image,
-                    output_size=(request.width, request.height),
-                    mode=request.mode,
-                    lab_metric=request.lab_metric,
-                    cmc_l=request.cmc_l,
-                    cmc_c=request.cmc_c,
-                    palette=palette,
-                    keep_aspect=request.keep_aspect,
-                    resize_method=request.resize_method,
-                    rgb_weights=request.rgb_weights,
-                    progress_callback=_progress_cb,
-                    cancel_event=self._cancel_event,
-                )
+                if request.mode == "全て":
+                    # 全モードは固定パラメータで実行する
+                    result = converter.convert_all_modes(
+                        input_path=input_path,
+                        input_image=input_image,
+                        output_size=(request.width, request.height),
+                        palette=palette,
+                        keep_aspect=request.keep_aspect,
+                        resize_method=request.resize_method,
+                        rgb_weights=(1.0, 1.0, 1.0),
+                        cmc_l=2.0,
+                        cmc_c=1.0,
+                        progress_callback=_progress_cb,
+                        cancel_event=self._cancel_event,
+                    )
+                else:
+                    result = converter.convert_image(
+                        input_path=input_path,
+                        input_image=input_image,
+                        output_size=(request.width, request.height),
+                        mode=request.mode,
+                        lab_metric=request.lab_metric,
+                        cmc_l=request.cmc_l,
+                        cmc_c=request.cmc_c,
+                        palette=palette,
+                        keep_aspect=request.keep_aspect,
+                        resize_method=request.resize_method,
+                        rgb_weights=request.rgb_weights,
+                        progress_callback=_progress_cb,
+                        cancel_event=self._cancel_event,
+                    )
             except converter.ConversionCancelled:
                 self._schedule_ui(0, on_cancelled)
                 return

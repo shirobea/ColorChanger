@@ -117,7 +117,7 @@ class LayoutMixin:
         mode_box = ttk.Combobox(
             mode_frame,
             textvariable=self.mode_var,
-            values=["なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"],
+            values=["全て", "なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"],
             state="readonly",
             width=18,
         )
@@ -454,6 +454,14 @@ class LayoutMixin:
                 self.lab_metric_frame.grid_remove()
         self._update_rgb_weight_controls()
         self._update_cmc_controls()
+        is_all = mode_upper == "全て"
+        if hasattr(self, "_set_color_usage_button_state"):
+            if is_all:
+                self._set_color_usage_button_state(False)
+            else:
+                has_usage = bool(getattr(self, "color_usage", None))
+                has_base = getattr(self, "_color_usage_base_image", None) is not None
+                self._set_color_usage_button_state(has_usage and has_base)
 
     def _build_preview_panel(self: "BeadsApp", preview_frame: ttk.Frame) -> None:
         self.input_canvas = ttk.Label(preview_frame, text="入力画像", anchor="center")
@@ -462,11 +470,37 @@ class LayoutMixin:
         self.input_canvas.bind("<ButtonRelease-1>", self._on_input_release)
         self.input_canvas.bind("<Leave>", self._on_input_release)
 
-        self.output_canvas = ttk.Label(preview_frame, text="変換後", anchor="center")
-        self.output_canvas.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
+        self.output_container = ttk.Frame(preview_frame)
+        self.output_container.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
+        self.output_container.rowconfigure(0, weight=1)
+        self.output_container.columnconfigure(0, weight=1)
+
+        self.output_canvas = ttk.Label(self.output_container, text="変換後", anchor="center")
+        self.output_canvas.grid(row=0, column=0, sticky="nsew")
         self.output_canvas.bind("<ButtonPress-1>", self._on_output_press)
         self.output_canvas.bind("<ButtonRelease-1>", self._on_output_release)
         self.output_canvas.bind("<Leave>", self._on_output_release)
+
+        self.output_grid_frame = ttk.Frame(self.output_container)
+        self.output_grid_frame.grid(row=0, column=0, sticky="nsew")
+        self.output_grid_frame.grid_remove()
+        for row in range(4):
+            self.output_grid_frame.rowconfigure(row, weight=1)
+        for col in range(4):
+            self.output_grid_frame.columnconfigure(col, weight=1)
+        self.output_grid_cells: list[dict[str, object]] = []
+        for idx in range(8):
+            row = idx // 2
+            col = idx % 2
+            cell = ttk.Frame(self.output_grid_frame)
+            cell.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            cell.rowconfigure(0, weight=1)
+            cell.columnconfigure(0, weight=1)
+            image_label = ttk.Label(cell, text="")
+            image_label.grid(row=0, column=0, sticky="nsew")
+            caption_label = ttk.Label(cell, text="", anchor="center")
+            caption_label.grid(row=1, column=0, pady=(2, 0), sticky="ew")
+            self.output_grid_cells.append({"frame": cell, "image": image_label, "caption": caption_label})
 
         self.preview_frame.bind("<Configure>", self._on_preview_resize)
 

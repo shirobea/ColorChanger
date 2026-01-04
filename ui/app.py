@@ -48,10 +48,12 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.output_pil: Optional[Image.Image] = None
         self._input_photo: Optional[ImageTk.PhotoImage] = None
         self._output_photo: Optional[ImageTk.PhotoImage] = None
+        self._output_grid_photos: list[ImageTk.PhotoImage] = []
         self.prev_output_pil: Optional[Image.Image] = None
         self.prev_settings: Optional[dict] = None
         self.last_settings: Optional[dict] = None
         self._pending_settings: Optional[dict] = None
+        self._all_mode_results: Optional[list[dict]] = None
         self.color_usage: list[dict] = []
         self._color_usage_base_image: Optional[np.ndarray] = None
         self._color_usage_window = None

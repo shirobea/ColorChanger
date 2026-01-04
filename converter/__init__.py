@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .pipeline import (
     convert_image,
+    convert_all_modes,
     ConversionCancelled,
     ProgressCb,
     CancelEvent,
@@ -12,6 +13,7 @@ from .pipeline import (
 
 __all__ = [
     "convert_image",
+    "convert_all_modes",
     "ConversionCancelled",
     "ProgressCb",
     "CancelEvent",
