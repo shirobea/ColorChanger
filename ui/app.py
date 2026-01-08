@@ -34,6 +34,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.palette = palette
         self._window_state_path = Path(__file__).resolve().parent / "window_state.json"
         self._settings_path = Path(__file__).resolve().parent / "settings.json"
+        self._saved_mode: Optional[str] = None  # 前回選択したモードを保持
         self._restored_geometry = self._load_window_state()
         self._last_geometry: Optional[tuple[int, int, int, int]] = None
         self._last_normal_geometry: Optional[tuple[int, int, int, int]] = None
@@ -101,9 +102,6 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
 
     # --- 設定復元と差分表示 ---
     def _apply_saved_settings(self) -> None:
-        if not self.last_settings:
-            return
-
         def _sanitize_choice(value: Optional[str], allowed: set[str], fallback: str) -> str:
             if value in allowed:
                 return value  # type: ignore[return-value]
@@ -111,17 +109,31 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
 
         allowed_resize = {"ニアレストネイバー", "バイリニア", "バイキュービック"}
         allowed_lab_metric = {"CIEDE2000", "CIE76", "CIE94"}
+        allowed_modes = {"全て", "なし", "RGB", "Lab", "Hunter Lab", "Oklab", "CMC(l:c)"}
         self.width_var.set("")
         self.height_var.set("")
-        mode = self.last_settings.get("モード")
-        if mode:
-            self.mode_var.set(mode)
-        resize_label = _sanitize_choice(self.last_settings.get("リサイズ方式"), allowed_resize, self.resize_method_var.get())
+        saved_mode = _sanitize_choice(self._saved_mode, allowed_modes, "")
+        if saved_mode:
+            # 最後に選択したモードを優先して復元
+            self.mode_var.set(saved_mode)
+        elif self.last_settings:
+            mode = self.last_settings.get("モード")
+            if mode:
+                self.mode_var.set(_sanitize_choice(mode, allowed_modes, self.mode_var.get()))
+        resize_label = _sanitize_choice(
+            self.last_settings.get("リサイズ方式") if self.last_settings else None,
+            allowed_resize,
+            self.resize_method_var.get(),
+        )
         self.resize_method_var.set(resize_label)
-        lab_metric = _sanitize_choice(self.last_settings.get("Lab距離式"), allowed_lab_metric, self.lab_metric_var.get())
+        lab_metric = _sanitize_choice(
+            self.last_settings.get("Lab距離式") if self.last_settings else None,
+            allowed_lab_metric,
+            self.lab_metric_var.get(),
+        )
         self.lab_metric_var.set(lab_metric)
         try:
-            cmc_l = self.last_settings.get("CMC l")
+            cmc_l = self.last_settings.get("CMC l") if self.last_settings else None
             if cmc_l is not None:
                 l_val = float(cmc_l)
                 self.cmc_l_var.set(l_val)
@@ -129,7 +141,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         except Exception:
             pass
         try:
-            cmc_c = self.last_settings.get("CMC c")
+            cmc_c = self.last_settings.get("CMC c") if self.last_settings else None
             if cmc_c is not None:
                 c_val = float(cmc_c)
                 self.cmc_c_var.set(c_val)
@@ -137,7 +149,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         except Exception:
             pass
         try:
-            rgb_w = self.last_settings.get("RGB重み")
+            rgb_w = self.last_settings.get("RGB重み") if self.last_settings else None
             if isinstance(rgb_w, (list, tuple)) and len(rgb_w) == 3:
                 r, g, b = (float(x) for x in rgb_w)
                 self.rgb_r_weight_var.set(r)
@@ -148,21 +160,22 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
                 self.rgb_b_display.set(f"{max(0.5, min(2.0, b)):.1f}")
         except Exception:
             pass
-        sanitized_settings = dict(self.last_settings)
-        sanitized_settings.setdefault("CMC l", f"{float(self.cmc_l_var.get()):.1f}")
-        sanitized_settings.setdefault("CMC c", f"{float(self.cmc_c_var.get()):.1f}")
-        sanitized_settings.setdefault(
-            "RGB重み",
-            [
-                float(self.rgb_r_weight_var.get()),
-                float(self.rgb_g_weight_var.get()),
-                float(self.rgb_b_weight_var.get()),
-            ],
-        )
-        sanitized_settings.setdefault("リサイズ方式", self.resize_method_var.get())
-        sanitized_settings.setdefault("モード", self.mode_var.get())
-        sanitized_settings.setdefault("Lab距離式", self.lab_metric_var.get())
-        self.last_settings = sanitized_settings
+        if self.last_settings is not None:
+            sanitized_settings = dict(self.last_settings)
+            sanitized_settings.setdefault("CMC l", f"{float(self.cmc_l_var.get()):.1f}")
+            sanitized_settings.setdefault("CMC c", f"{float(self.cmc_c_var.get()):.1f}")
+            sanitized_settings.setdefault(
+                "RGB重み",
+                [
+                    float(self.rgb_r_weight_var.get()),
+                    float(self.rgb_g_weight_var.get()),
+                    float(self.rgb_b_weight_var.get()),
+                ],
+            )
+            sanitized_settings.setdefault("リサイズ方式", self.resize_method_var.get())
+            sanitized_settings.setdefault("モード", self.mode_var.get())
+            sanitized_settings.setdefault("Lab距離式", self.lab_metric_var.get())
+            self.last_settings = sanitized_settings
         self._update_mode_frames()
 
     def _build_diff_overlay(self) -> str:
@@ -284,5 +297,6 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
     def _on_close(self) -> None:
         self._closing = True
         self._cancel_worker_safely()
+        self._remember_mode_selection()
         self._save_window_state()
         self.root.destroy()

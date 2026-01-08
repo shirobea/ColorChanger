@@ -67,23 +67,43 @@ class StateMixin:
             data = json.loads(self._settings_path.read_text(encoding="utf-8"))
             self.last_settings = data.get("last_settings")
             self.prev_settings = data.get("prev_settings")
+            self._saved_mode = data.get("selected_mode")
         except Exception:
             # 復元に失敗しても起動は続ける
             self.last_settings = None
             self.prev_settings = None
+            self._saved_mode = None
 
     def _save_settings(self: "BeadsApp") -> None:
         """現在の設定差分を保存する。"""
         try:
             if not hasattr(self, "_settings_path"):
                 return
+            selected_mode = getattr(self, "_saved_mode", None)
+            if hasattr(self, "mode_var"):
+                try:
+                    selected_mode = self.mode_var.get()
+                except Exception:
+                    pass
             payload = {
                 "last_settings": self.last_settings,
                 "prev_settings": self.prev_settings,
+                "selected_mode": selected_mode,
             }
             self._settings_path.write_text(json.dumps(payload), encoding="utf-8")
         except Exception:
             # 保存失敗は致命的ではないので無視
+            pass
+
+    def _remember_mode_selection(self: "BeadsApp") -> None:
+        """選択中の変換モードだけを保存する。"""
+        try:
+            if not hasattr(self, "mode_var"):
+                return
+            # 変換しなくても次回のモード復元に使う
+            self._saved_mode = self.mode_var.get()
+            self._save_settings()
+        except Exception:
             pass
 
     def _save_window_state(self: "BeadsApp") -> None:

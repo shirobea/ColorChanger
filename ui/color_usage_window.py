@@ -58,6 +58,14 @@ class ColorUsageWindow:
         window.geometry("480x360")
         window.minsize(420, 280)
         window.protocol("WM_DELETE_WINDOW", self._handle_close)
+        # OS側の最大化を優先して一覧を見やすくする
+        try:
+            window.state("zoomed")
+        except tk.TclError:
+            try:
+                window.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
         self._window = window
 
         container = ttk.Frame(window, padding=8)
@@ -157,7 +165,82 @@ class ColorUsageWindow:
         self._tree = tree
         self._preview_canvas = preview_canvas
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self._tree.bind("<Button-1>", self._on_tree_click, add="+")
         self.update_rows(rows, reset_sort=True)
+        self._bind_keyboard_shortcuts()
+
+    def _bind_keyboard_shortcuts(self) -> None:
+        """プレビュー操作用のキーを登録する。"""
+        self._window.bind("<KeyPress>", self._on_preview_key, add="+")
+
+    def _on_preview_key(self, event: tk.Event) -> Optional[str]:
+        """WASD/QEでプレビューを操作する。"""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        if keysym in {"w", "a", "s", "d"}:
+            self._move_preview_by_key(keysym)
+            return "break"
+        if keysym in {"q", "e"}:
+            self._zoom_preview_by_key(keysym)
+            return "break"
+        if keysym == "f":
+            self._grid_var.set(not self._grid_var.get())
+            self._on_grid_toggle()
+            return "break"
+        return None
+
+    def _move_preview_by_key(self, key: str) -> None:
+        """WASDでプレビューを移動する。"""
+        if self._preview_base_image is None:
+            return
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        box_w, box_h = self._get_preview_box_size()
+        region_w, region_h = self._preview_region_size
+        if region_w <= box_w and region_h <= box_h:
+            return
+        step = max(12, int(min(box_w, box_h) * 0.07))
+        dx = 0
+        dy = 0
+        if key == "w":
+            dy = -step
+        elif key == "s":
+            dy = step
+        elif key == "a":
+            dx = -step
+        elif key == "d":
+            dx = step
+        self._move_preview_by_pixels(dx, dy)
+
+    def _move_preview_by_pixels(self, dx: int, dy: int) -> None:
+        """スクロール領域内で表示位置をずらす。"""
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        box_w, box_h = self._get_preview_box_size()
+        region_w, region_h = self._preview_region_size
+        if region_w <= 0 or region_h <= 0:
+            return
+        max_x0 = max(0.0, region_w - box_w)
+        max_y0 = max(0.0, region_h - box_h)
+        xview = canvas.xview()
+        yview = canvas.yview()
+        cur_x0 = xview[0] * region_w
+        cur_y0 = yview[0] * region_h
+        new_x0 = min(max(cur_x0 + dx, 0.0), max_x0)
+        new_y0 = min(max(cur_y0 + dy, 0.0), max_y0)
+        if max_x0 > 0:
+            canvas.xview_moveto(new_x0 / float(region_w))
+        if max_y0 > 0:
+            canvas.yview_moveto(new_y0 / float(region_h))
+
+    def _zoom_preview_by_key(self, key: str) -> None:
+        """Q/Eで画面中心を基準に拡大縮小する。"""
+        if self._preview_base_image is None:
+            return
+        box_w, box_h = self._get_preview_box_size()
+        delta = -120 if key == "q" else 120
+        self._apply_preview_zoom(delta, box_w / 2, box_h / 2)
 
     def _on_tone_pointer(self, event: tk.Event) -> str:
         """クリック位置に合わせてスライダー値を動かす。"""
@@ -229,6 +312,23 @@ class ColorUsageWindow:
             return
         rgb = self._item_rgb.get(selection[0])
         self._notify_selection(rgb)
+
+    def _on_tree_click(self, event: tk.Event) -> Optional[str]:
+        """左クリックで選択/解除を切り替える。"""
+        region = self._tree.identify_region(event.x, event.y)
+        if region == "heading":
+            return None
+        item_id = self._tree.identify_row(event.y)
+        if not item_id:
+            return None
+        if item_id in self._tree.selection():
+            self._tree.selection_remove(item_id)
+            self._notify_selection(None)
+        else:
+            self._tree.selection_set(item_id)
+            rgb = self._item_rgb.get(item_id)
+            self._notify_selection(rgb)
+        return "break"
 
     def _notify_selection(self, rgb: Optional[tuple[int, int, int]]) -> None:
         """選択色をコールバックへ渡す。"""
@@ -354,8 +454,12 @@ class ColorUsageWindow:
             delta = -120
         if delta == 0:
             return
+        self._apply_preview_zoom(delta, float(event.x), float(event.y))
+
+    def _apply_preview_zoom(self, delta: int, anchor_x: float, anchor_y: float) -> None:
+        """指定座標を基準に拡大縮小する。"""
         canvas = self._preview_canvas
-        if canvas is None:
+        if canvas is None or self._preview_base_image is None:
             return
         box_w, box_h = self._get_preview_box_size()
         img_w, img_h = self._preview_base_image.size
@@ -367,9 +471,9 @@ class ColorUsageWindow:
         old_scaled_h = max(1, int(img_h * old_scale))
         old_pos_x = 0.0 if old_scaled_w >= box_w else (box_w - old_scaled_w) / 2
         old_pos_y = 0.0 if old_scaled_h >= box_h else (box_h - old_scaled_h) / 2
-        # マウス位置を中心に拡大縮小するための基準座標を求める
-        cursor_canvas_x = float(canvas.canvasx(event.x))
-        cursor_canvas_y = float(canvas.canvasy(event.y))
+        # 指定座標を基準に拡大縮小するための基準座標を求める
+        cursor_canvas_x = float(canvas.canvasx(anchor_x))
+        cursor_canvas_y = float(canvas.canvasy(anchor_y))
         base_x = (cursor_canvas_x - old_pos_x) / old_scale
         base_y = (cursor_canvas_y - old_pos_y) / old_scale
         base_x = min(max(base_x, 0.0), float(img_w))
@@ -391,8 +495,8 @@ class ColorUsageWindow:
         if new_zoom == old_zoom:
             return
         self._preview_zoom = new_zoom
-        # 連続スクロール中は描画を間引いて最後にまとめて更新する
-        self._preview_zoom_anchor = (base_x, base_y, float(event.x), float(event.y))
+        # 連続操作中は描画を間引いて最後にまとめて更新する
+        self._preview_zoom_anchor = (base_x, base_y, float(anchor_x), float(anchor_y))
         if self._grid_var.get():
             # グリッドは後から描き直して負荷を抑える
             self._preview_grid_suspended = True

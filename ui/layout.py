@@ -342,6 +342,9 @@ class LayoutMixin:
 
     def _on_mode_changed(self: "BeadsApp") -> None:
         self._update_mode_frames()
+        # 変換前でもモード選択を保持する
+        if hasattr(self, "_remember_mode_selection"):
+            self._remember_mode_selection()
 
     def _is_cmc_mode(self: "BeadsApp") -> bool:
         return self.mode_var.get().upper().startswith("CMC")
