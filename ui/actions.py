@@ -9,13 +9,12 @@ from typing import Optional, TYPE_CHECKING, Callable, Any
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageFilter
-
-import converter
-import cv2
+from PIL import Image
 from color_spaces import rgb_to_lab
 from .models import ConversionRequest
 from .color_usage_window import ColorUsageWindow
+from .color_usage_service import build_color_usage_rows
+from .noise_filters import build_noise_filter_registry
 import numpy as np
 
 if TYPE_CHECKING:
@@ -58,7 +57,7 @@ class ActionsMixin:
         self._input_using_filtered = False
         self._showing_input_overlay = False
         filters = self._get_noise_filter_registry()
-        if self.noise_filter_var.get() not in filters:
+        if filters and self.noise_filter_var.get() not in filters:
             self.noise_filter_var.set(next(iter(filters)))
         self.output_pil = None
         self.output_image = None
@@ -113,32 +112,13 @@ class ActionsMixin:
     def _get_noise_filter_registry(self: "BeadsApp") -> dict[str, Callable[[Image.Image], Image.Image]]:
         """追加しやすいようフィルタ名と実装を辞書でまとめる。"""
         size = self._sanitize_kernel_size(self.noise_filter_size_var.get())
-        return {
-            "メディアン": lambda img: Image.fromarray(
-                cv2.medianBlur(np.asarray(img.convert("RGB"), dtype=np.uint8), size)
-            ),
-            "ガウシアン": lambda img: Image.fromarray(
-                cv2.GaussianBlur(np.asarray(img.convert("RGB"), dtype=np.uint8), (size, size), 0)
-            ),
-            "バイラテラル": lambda img: Image.fromarray(
-                cv2.bilateralFilter(
-                    np.asarray(img.convert("RGB"), dtype=np.uint8),
-                    size,  # 近傍直径
-                    sigmaColor=float(size * 6),  # 色差に対する標準偏差
-                    sigmaSpace=float(size * 2),  # 座標距離に対する標準偏差
-                )
-            ),
-            "非局所的平均": lambda img: Image.fromarray(
-                cv2.fastNlMeansDenoisingColored(
-                    np.asarray(img.convert("RGB"), dtype=np.uint8),
-                    None,
-                    h=8.0,
-                    hColor=10.0,
-                    templateWindowSize=size,
-                    searchWindowSize=max(7, size * 3),
-                )
-            ),
-        }
+        try:
+            return build_noise_filter_registry(size)
+        except RuntimeError as exc:
+            if not getattr(self, "_noise_filter_error_shown", False):
+                messagebox.showerror("ノイズ除去未対応", f"ノイズ除去にはOpenCVが必要です。\n{exc}")
+                setattr(self, "_noise_filter_error_shown", True)
+            return {}
 
     def apply_noise_reduction(self: "BeadsApp") -> None:
         """入力画像にノイズ除去フィルタを適用する（別スレッドで実行）。"""
@@ -148,6 +128,9 @@ class ActionsMixin:
         if getattr(self, "_noise_busy", False):
             return
         filters = self._get_noise_filter_registry()
+        if not filters:
+            messagebox.showinfo("ノイズ除去未対応", "OpenCVが見つからないためノイズ除去は利用できません。")
+            return
         name = self.noise_filter_var.get()
         filter_func = filters.get(name)
         if filter_func is None:
@@ -204,7 +187,7 @@ class ActionsMixin:
         self._set_noise_busy(False)
 
     def _on_space_key(self: "BeadsApp", _event: "tk.Event") -> str:
-        if self.worker_thread and self.worker_thread.is_alive():
+        if self._runner.is_running:
             self.cancel_conversion()
         else:
             self.start_conversion()
@@ -337,27 +320,7 @@ class ActionsMixin:
             mode = str(settings.get("モード", ""))
         if mode.lower() in {"none", "なし", "全て"}:
             return []
-        palette_map: dict[tuple[int, int, int], dict[str, str]] = {}
-        for color in self.palette:
-            rgb = tuple(int(round(v)) for v in color.rgb)
-            palette_map[rgb] = {"color_id": color.color_id, "name": color.name}
-        flat = image.reshape(-1, 3)
-        colors, counts = np.unique(flat, axis=0, return_counts=True)
-        rows: list[dict] = []
-        for rgb_arr, count in zip(colors, counts):
-            rgb = (int(rgb_arr[0]), int(rgb_arr[1]), int(rgb_arr[2]))
-            info = palette_map.get(rgb)
-            if not info:
-                continue
-            rows.append(
-                {
-                    "color_id": info["color_id"],
-                    "name": info["name"],
-                    "count": int(count),
-                    "rgb": rgb,
-                }
-            )
-        rows.sort(key=lambda r: int(r.get("count", 0)), reverse=True)
+        _, rows = build_color_usage_rows(image, self.palette, require_in_palette=False)
         return rows
 
     def _get_all_mode_grid_shape(self: "BeadsApp", width: int, height: int) -> tuple[int, int]:
@@ -382,7 +345,10 @@ class ActionsMixin:
         for idx, img in enumerate(images[: rows * cols]):
             if img.shape[:2] != (base_h, base_w):
                 # サイズが異なる場合は最小限のリサイズを行う
-                img = cv2.resize(img, (base_w, base_h), interpolation=cv2.INTER_NEAREST)
+                img = np.asarray(
+                    Image.fromarray(img).resize((base_w, base_h), Image.Resampling.NEAREST),
+                    dtype=np.uint8,
+                )
             row = idx // cols
             col = idx % cols
             y0 = row * base_h
@@ -392,52 +358,7 @@ class ActionsMixin:
 
     def _analyze_palette_usage(self: "BeadsApp", image: np.ndarray) -> tuple[bool, list[dict]]:
         """入力画像がパレット内の色だけか確認し、色使用一覧を作成する。"""
-        if image is None or image.ndim != 3 or image.shape[2] != 3:
-            return False, []
-        palette_map: dict[tuple[int, int, int], dict[str, str]] = {}
-        for color in self.palette:
-            rgb = tuple(int(round(v)) for v in color.rgb)
-            palette_map[rgb] = {"color_id": color.color_id, "name": color.name}
-        # パレット外の色が見つかった時点で早期終了する
-        palette_codes = np.array(
-            [
-                (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]
-                for rgb in palette_map.keys()
-            ],
-            dtype=np.uint32,
-        )
-        if palette_codes.size == 0:
-            return False, []
-        flat = image.reshape(-1, 3)
-        total = flat.shape[0]
-        chunk_size = 200_000
-        for start in range(0, total, chunk_size):
-            chunk = flat[start : start + chunk_size]
-            codes = (
-                (chunk[:, 0].astype(np.uint32) << 16)
-                | (chunk[:, 1].astype(np.uint32) << 8)
-                | chunk[:, 2].astype(np.uint32)
-            )
-            if not np.isin(codes, palette_codes).all():
-                return False, []
-        # 全色が一致した場合のみ色使用一覧を作る
-        colors, counts = np.unique(flat, axis=0, return_counts=True)
-        rows: list[dict] = []
-        for rgb_arr, count in zip(colors, counts):
-            rgb = (int(rgb_arr[0]), int(rgb_arr[1]), int(rgb_arr[2]))
-            info = palette_map.get(rgb)
-            if not info:
-                return False, []
-            rows.append(
-                {
-                    "color_id": info["color_id"],
-                    "name": info["name"],
-                    "count": int(count),
-                    "rgb": rgb,
-                }
-            )
-        rows.sort(key=lambda r: int(r.get("count", 0)), reverse=True)
-        return True, rows
+        return build_color_usage_rows(image, self.palette, require_in_palette=True)
 
     def _update_color_usage_from_input(self: "BeadsApp", image: Image.Image) -> bool:
         """入力画像がパレット色のみなら色使用一覧を有効化する。"""
@@ -465,7 +386,9 @@ class ActionsMixin:
         """色使用一覧のプレビューを更新する。"""
         window = getattr(self, "_color_usage_window", None)
         if window and window.is_alive():
-            window.set_preview_image(self._make_color_usage_preview(rgb))
+            preview_image = self._make_color_usage_preview(rgb)
+            source_image = self._get_color_usage_base_pil()
+            window.set_preview_image(preview_image, source_image)
 
     def _make_color_usage_preview(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> Optional[Image.Image]:
         """選択色以外を薄くしたプレビュー画像を作る。"""
@@ -494,9 +417,18 @@ class ActionsMixin:
         result[~mask] = dim[~mask]
         return Image.fromarray(result)
 
+    def _get_color_usage_base_pil(self: "BeadsApp") -> Optional[Image.Image]:
+        """プレビューの色拾い用に元画像をPIL化する。"""
+        base_image = self._color_usage_base_image if self._color_usage_base_image is not None else self.output_image
+        if base_image is None:
+            return None
+        return Image.fromarray(np.asarray(base_image, dtype=np.uint8))
+
     def _on_color_usage_window_closed(self: "BeadsApp") -> None:
         """色使用一覧ウィンドウを閉じた後の参照をクリアする。"""
         self._color_usage_window = None
+        # 非選択色の明暗値を閉じるタイミングで保存する
+        self._save_settings()
 
     def _on_color_usage_select(self: "BeadsApp", rgb: Optional[tuple[int, int, int]]) -> None:
         """色使用一覧で選択された色に合わせてプレビューを更新する。"""
@@ -656,8 +588,6 @@ class ActionsMixin:
         clear_canvas: bool,
         preserve_output: bool = False,
     ) -> None:
-        self.cancel_event = None
-        self.worker_thread = None
         self._start_time = None
         if not preserve_output:
             self.output_image = None
@@ -694,7 +624,11 @@ class ActionsMixin:
             messagebox.showinfo("入力画像なし", "先に入力画像を選択してください。")
             return
         # Lab空間での明度と彩度の広がりを見てバランスを決める
-        lab = rgb_to_lab(np.asarray(self.input_pil.convert("RGB"), dtype=np.uint8))
+        try:
+            lab = rgb_to_lab(np.asarray(self.input_pil.convert("RGB"), dtype=np.uint8))
+        except RuntimeError as exc:
+            messagebox.showerror("CMC最適化失敗", f"CMC最適化にはOpenCVが必要です。\n{exc}")
+            return
         l_vals = lab[..., 0]
         chroma = np.sqrt(lab[..., 1] ** 2 + lab[..., 2] ** 2)
         l_spread = float(np.percentile(l_vals, 95) - np.percentile(l_vals, 5))

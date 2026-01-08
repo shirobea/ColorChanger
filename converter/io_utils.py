@@ -4,15 +4,23 @@ from __future__ import annotations
 
 from typing import Iterable, Tuple
 
-import cv2
 import numpy as np
 
 Size = Tuple[int, int]
 
 
+def _require_cv2():
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("OpenCV (cv2) が必要です。pip install opencv-python") from exc
+    return cv2
+
+
 def _imread_unicode(path: str) -> np.ndarray | None:
     """Unicodeパスでも安全に画像を読み込む。"""
     try:
+        cv2 = _require_cv2()
         data = np.fromfile(path, dtype=np.uint8)
         img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         return img
@@ -22,6 +30,7 @@ def _imread_unicode(path: str) -> np.ndarray | None:
 
 def _load_image_rgb(input_path: str) -> np.ndarray:
     """入力パスからRGB画像を読み込む。Unicodeパスも許容。"""
+    cv2 = _require_cv2()
     image_bgr = cv2.imread(input_path, cv2.IMREAD_COLOR)
     if image_bgr is None:
         image_bgr = _imread_unicode(input_path)

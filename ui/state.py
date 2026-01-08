@@ -68,6 +68,16 @@ class StateMixin:
             self.last_settings = data.get("last_settings")
             self.prev_settings = data.get("prev_settings")
             self._saved_mode = data.get("selected_mode")
+            # 色使用一覧の明暗スライダー値も復元する
+            if hasattr(self, "color_usage_tone_var"):
+                tone_raw = data.get("color_usage_tone")
+                if tone_raw is not None:
+                    try:
+                        tone_val = float(tone_raw)
+                        tone_val = max(-1.0, min(1.0, tone_val))
+                        self.color_usage_tone_var.set(tone_val)
+                    except Exception:
+                        pass
         except Exception:
             # 復元に失敗しても起動は続ける
             self.last_settings = None
@@ -90,6 +100,13 @@ class StateMixin:
                 "prev_settings": self.prev_settings,
                 "selected_mode": selected_mode,
             }
+            # 色使用一覧の明暗スライダー値も保存する
+            if hasattr(self, "color_usage_tone_var"):
+                try:
+                    tone_val = float(self.color_usage_tone_var.get())
+                    payload["color_usage_tone"] = max(-1.0, min(1.0, tone_val))
+                except Exception:
+                    pass
             self._settings_path.write_text(json.dumps(payload), encoding="utf-8")
         except Exception:
             # 保存失敗は致命的ではないので無視

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Callable, Tuple
 import threading
 
-import cv2
 import numpy as np
 
 from palette import BeadPalette
@@ -15,6 +14,7 @@ from .quantize import _map_centers_to_palette, _report
 ProgressCb = Callable[[float], None]
 CancelEvent = threading.Event
 Size = Tuple[int, int]
+PACKED_UNIQUE_THRESHOLD = 2_000_000
 
 ALL_MODE_SPECS = [
     {"label": "なし", "mode": "none"},
@@ -30,6 +30,14 @@ ALL_MODE_SPECS = [
 
 class ConversionCancelled(Exception):
     """ユーザーによる中断を示す例外。"""
+
+
+def _require_cv2():
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("OpenCV (cv2) が必要です。pip install opencv-python") from exc
+    return cv2
 
 
 def _map_image_to_palette(
@@ -48,10 +56,25 @@ def _map_image_to_palette(
     start, end = progress_range
     _report(progress_callback, start, cancel_event)
 
-    flat = image_rgb.reshape(-1, 3).astype(np.float32)
-    colors, inv = np.unique(flat, axis=0, return_inverse=True)
+    flat = image_rgb.reshape(-1, 3)
+    total_pixels = flat.shape[0]
+    if total_pixels > PACKED_UNIQUE_THRESHOLD:
+        flat_u32 = flat.astype(np.uint32, copy=False)
+        codes = (flat_u32[:, 0] << 16) | (flat_u32[:, 1] << 8) | flat_u32[:, 2]
+        unique_codes, inv = np.unique(codes, return_inverse=True)
+        centers = np.stack(
+            (
+                (unique_codes >> 16) & 0xFF,
+                (unique_codes >> 8) & 0xFF,
+                unique_codes & 0xFF,
+            ),
+            axis=1,
+        ).astype(np.float32)
+    else:
+        centers, inv = np.unique(flat, axis=0, return_inverse=True)
+        centers = centers.astype(np.float32, copy=False)
     mapping = _map_centers_to_palette(
-        colors,
+        centers,
         palette,
         mode,
         progress_callback=progress_callback,
@@ -84,6 +107,7 @@ def convert_image(
 ) -> np.ndarray:
     """入力画像を指定サイズへリサイズし、パレットへ写像して返す。"""
     _report(progress_callback, 0.0, cancel_event)
+    cv2 = _require_cv2()
     if input_image is not None:
         # 事前ノイズ除去などで渡されたRGB配列を優先する
         image_rgb = np.asarray(input_image, dtype=np.uint8)
@@ -140,6 +164,7 @@ def convert_all_modes(
 ) -> list[dict[str, np.ndarray]]:
     """全ての変換モードで処理した結果を順番に返す。"""
     _report(progress_callback, 0.0, cancel_event)
+    cv2 = _require_cv2()
     if input_image is not None:
         # 事前ノイズ除去などで渡されたRGB配列を優先する
         image_rgb = np.asarray(input_image, dtype=np.uint8)

@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import numpy as np
-import cv2
+
+
+def _require_cv2():
+    try:
+        import cv2  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("OpenCV (cv2) が必要です。pip install opencv-python") from exc
+    return cv2
 
 
 def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
@@ -11,6 +18,7 @@ def rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     arr = np.asarray(rgb, dtype=np.float32)
     original_shape = arr.shape
     flat = arr.reshape(-1, 3)
+    cv2 = _require_cv2()
     # OpenCV expects BGR; convert and scale to 0-1 for correct range.
     bgr = flat[:, ::-1] / 255.0
     lab = cv2.cvtColor(bgr.reshape(-1, 1, 3), cv2.COLOR_BGR2Lab).reshape(-1, 3)
@@ -80,81 +88,182 @@ def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
     return oklab.reshape(original_shape)
 
 
-def cmc_delta_e(lab_sample: np.ndarray, lab_array: np.ndarray, l_weight: float = 2.0, c_weight: float = 1.0) -> np.ndarray:
-    """Vectorized CMC(l:c) between one sample and many targets."""
-    L1, a1, b1 = lab_sample.astype(np.float64)
-    L2 = lab_array[:, 0].astype(np.float64)
-    a2 = lab_array[:, 1].astype(np.float64)
-    b2 = lab_array[:, 2].astype(np.float64)
+def _ciede2000_matrix(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIEDE2000の距離行列をベクトル化して返す。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    l1 = lab1[:, 0][:, None]
+    a1 = lab1[:, 1][:, None]
+    b1 = lab1[:, 2][:, None]
+    l2 = lab2[None, :, 0]
+    a2 = lab2[None, :, 1]
+    b2 = lab2[None, :, 2]
 
-    C1 = np.sqrt(a1 ** 2 + b1 ** 2)
-    C2 = np.sqrt(a2 ** 2 + b2 ** 2)
-    deltaL = L1 - L2
-    deltaC = C1 - C2
-    deltaa = a1 - a2
-    deltab = b1 - b2
-    deltaH_sq = np.maximum(0.0, deltaa ** 2 + deltab ** 2 - deltaC ** 2)
+    avg_l = (l1 + l2) * 0.5
+    c1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    c2 = np.sqrt(a2 ** 2 + b2 ** 2)
+    avg_c = (c1 + c2) * 0.5
+    g = 0.5 * (1 - np.sqrt((avg_c ** 7) / (avg_c ** 7 + 25.0 ** 7)))
+    a1p = (1 + g) * a1
+    a2p = (1 + g) * a2
+    c1p = np.sqrt(a1p ** 2 + b1 ** 2)
+    c2p = np.sqrt(a2p ** 2 + b2 ** 2)
+    avg_cp = (c1p + c2p) * 0.5
 
-    H1 = np.degrees(np.arctan2(b1, a1))
-    if H1 < 0:
-        H1 += 360.0
-    if 164.0 <= H1 <= 345.0:
-        T = 0.56 + abs(0.2 * np.cos(np.radians(H1 + 168.0)))
-    else:
-        T = 0.36 + abs(0.4 * np.cos(np.radians(H1 + 35.0)))
+    h1p = np.degrees(np.arctan2(b1, a1p))
+    h2p = np.degrees(np.arctan2(b2, a2p))
+    h1p = np.where(h1p < 0, h1p + 360.0, h1p)
+    h2p = np.where(h2p < 0, h2p + 360.0, h2p)
 
-    F = 0.0
-    denom_f = C1 ** 4 + 1900.0
-    if denom_f > 0:
-        F = np.sqrt((C1 ** 4) / denom_f)
+    deltahp = h2p - h1p
+    deltahp = np.where(deltahp > 180.0, deltahp - 360.0, deltahp)
+    deltahp = np.where(deltahp < -180.0, deltahp + 360.0, deltahp)
 
-    S_L = 0.511 if L1 < 16.0 else (0.040975 * L1) / (1 + 0.01765 * L1)
-    S_C = 0.0638 * C1 / (1 + 0.0131 * C1) + 0.638
-    S_H = S_C * (F * T + 1 - F)
+    delta_lp = l2 - l1
+    delta_cp = c2p - c1p
+    delta_hp = 2.0 * np.sqrt(c1p * c2p) * np.sin(np.radians(deltahp) * 0.5)
 
-    l_w = max(l_weight, 1e-6)
-    c_w = max(c_weight, 1e-6)
-    S_L = max(S_L, 1e-6)
-    S_C = max(S_C, 1e-6)
-    S_H = max(S_H, 1e-6)
+    avg_hp = (h1p + h2p) * 0.5
+    avg_hp = np.where(np.abs(h1p - h2p) > 180.0, avg_hp + 180.0, avg_hp)
+    avg_hp = np.where(avg_hp >= 360.0, avg_hp - 360.0, avg_hp)
+
+    t = (
+        1
+        - 0.17 * np.cos(np.radians(avg_hp - 30.0))
+        + 0.24 * np.cos(np.radians(2.0 * avg_hp))
+        + 0.32 * np.cos(np.radians(3.0 * avg_hp + 6.0))
+        - 0.20 * np.cos(np.radians(4.0 * avg_hp - 63.0))
+    )
+
+    sl = 1 + (0.015 * (avg_l - 50.0) ** 2) / np.sqrt(20.0 + (avg_l - 50.0) ** 2)
+    sc = 1 + 0.045 * avg_cp
+    sh = 1 + 0.015 * avg_cp * t
+
+    delta_theta = 30.0 * np.exp(-((avg_hp - 275.0) / 25.0) ** 2)
+    rc = 2.0 * np.sqrt((avg_cp ** 7) / (avg_cp ** 7 + 25.0 ** 7))
+    rt = -np.sin(2.0 * np.radians(delta_theta)) * rc
 
     return np.sqrt(
-        (deltaL / (l_w * S_L)) ** 2
-        + (deltaC / (c_w * S_C)) ** 2
-        + deltaH_sq / (S_H ** 2)
+        (delta_lp / sl) ** 2
+        + (delta_cp / sc) ** 2
+        + (delta_hp / sh) ** 2
+        + rt * (delta_cp / sc) * (delta_hp / sh)
     )
+
+
+def _ciede94_matrix(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIE94距離の行列計算（グラフィックアーツ標準）。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    l1 = lab1[:, 0][:, None]
+    a1 = lab1[:, 1][:, None]
+    b1 = lab1[:, 2][:, None]
+    l2 = lab2[None, :, 0]
+    a2 = lab2[None, :, 1]
+    b2 = lab2[None, :, 2]
+
+    delta_l = l1 - l2
+    c1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    c2 = np.sqrt(a2 ** 2 + b2 ** 2)
+    delta_c = c1 - c2
+
+    delta_e_sq = (l1 - l2) ** 2 + (a1 - a2) ** 2 + (b1 - b2) ** 2
+    delta_h_sq = np.maximum(0.0, delta_e_sq - delta_c ** 2)
+
+    k1 = 0.045
+    k2 = 0.015
+    s_l = 1.0
+    s_c = 1.0 + k1 * c1
+    s_h = 1.0 + k2 * c1
+
+    return np.sqrt((delta_l / s_l) ** 2 + (delta_c / s_c) ** 2 + (delta_h_sq / (s_h ** 2)))
+
+
+def _ciede76_matrix(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIE76距離の行列計算。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    diff = lab2[None, :, :] - lab1[:, None, :]
+    return np.sqrt(np.sum(diff ** 2, axis=2))
+
+
+def _cmc_matrix(lab1: np.ndarray, lab2: np.ndarray, l_weight: float, c_weight: float) -> np.ndarray:
+    """CMC(l:c)をサンプル×パレットで一括計算。"""
+    lab1 = lab1.astype(np.float64, copy=False)
+    lab2 = lab2.astype(np.float64, copy=False)
+    l_w = max(l_weight, 1e-6)
+    c_w = max(c_weight, 1e-6)
+
+    l1 = lab1[:, 0][:, None]
+    a1 = lab1[:, 1][:, None]
+    b1 = lab1[:, 2][:, None]
+    l2 = lab2[None, :, 0]
+    a2 = lab2[None, :, 1]
+    b2 = lab2[None, :, 2]
+
+    c1 = np.sqrt(a1 ** 2 + b1 ** 2)
+    c2 = np.sqrt(a2 ** 2 + b2 ** 2)
+
+    delta_l = l1 - l2
+    delta_c = c1 - c2
+    delta_a = a1 - a2
+    delta_b = b1 - b2
+    delta_h_sq = np.maximum(0.0, delta_a ** 2 + delta_b ** 2 - delta_c ** 2)
+
+    h1 = np.degrees(np.arctan2(b1, a1))
+    h1 = np.where(h1 < 0, h1 + 360.0, h1)
+    t = np.where(
+        (h1 >= 164.0) & (h1 <= 345.0),
+        0.56 + np.abs(0.2 * np.cos(np.radians(h1 + 168.0))),
+        0.36 + np.abs(0.4 * np.cos(np.radians(h1 + 35.0))),
+    )
+
+    denom_f = c1 ** 4 + 1900.0
+    f = np.sqrt((c1 ** 4) / denom_f, where=denom_f > 0, out=np.zeros_like(denom_f))
+
+    s_l = np.where(l1 < 16.0, 0.511, (0.040975 * l1) / (1 + 0.01765 * l1))
+    s_c = 0.0638 * c1 / (1 + 0.0131 * c1) + 0.638
+    s_h = s_c * (f * t + 1 - f)
+
+    return np.sqrt((delta_l / (l_w * s_l)) ** 2 + (delta_c / (c_w * s_c)) ** 2 + delta_h_sq / (s_h ** 2))
+
+
+def lab_distance_matrix(lab1: np.ndarray, lab2: np.ndarray, metric: str = "CIEDE2000") -> np.ndarray:
+    """Lab距離の行列を返す。"""
+    metric_upper = str(metric).upper()
+    if metric_upper == "CIE76":
+        return _ciede76_matrix(lab1, lab2)
+    if metric_upper == "CIE94":
+        return _ciede94_matrix(lab1, lab2)
+    return _ciede2000_matrix(lab1, lab2)
+
+
+def cmc_distance_matrix(
+    lab1: np.ndarray, lab2: np.ndarray, l_weight: float = 2.0, c_weight: float = 1.0
+) -> np.ndarray:
+    """CMC(l:c)距離の行列を返す。"""
+    return _cmc_matrix(lab1, lab2, l_weight, c_weight)
+
+
+def cmc_delta_e(lab_sample: np.ndarray, lab_array: np.ndarray, l_weight: float = 2.0, c_weight: float = 1.0) -> np.ndarray:
+    """Vectorized CMC(l:c) between one sample and many targets."""
+    sample = np.asarray(lab_sample, dtype=np.float64).reshape(1, 3)
+    targets = np.asarray(lab_array, dtype=np.float64)
+    return cmc_distance_matrix(sample, targets, l_weight=l_weight, c_weight=c_weight).reshape(-1)
 
 
 def ciede76(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
     """CIE76のΔE。"""
-    delta = lab_array.astype(np.float64) - lab_sample.astype(np.float64)
-    return np.sqrt(np.sum(delta ** 2, axis=1))
+    sample = np.asarray(lab_sample, dtype=np.float64).reshape(1, 3)
+    targets = np.asarray(lab_array, dtype=np.float64)
+    return lab_distance_matrix(sample, targets, metric="CIE76").reshape(-1)
 
 
 def ciede94(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
     """CIE94のΔE（グラフィックアーツ標準）。"""
-    L1, a1, b1 = lab_sample.astype(np.float64)
-    L2 = lab_array[:, 0].astype(np.float64)
-    a2 = lab_array[:, 1].astype(np.float64)
-    b2 = lab_array[:, 2].astype(np.float64)
-
-    deltaL = L1 - L2
-    C1 = np.sqrt(a1 ** 2 + b1 ** 2)
-    C2 = np.sqrt(a2 ** 2 + b2 ** 2)
-    deltaC = C1 - C2
-
-    deltaE_ab_sq = (L1 - L2) ** 2 + (a1 - a2) ** 2 + (b1 - b2) ** 2
-    deltaH_sq = np.maximum(0.0, deltaE_ab_sq - deltaC ** 2)
-
-    kL = kC = kH = 1.0
-    K1 = 0.045
-    K2 = 0.015
-
-    S_L = 1.0
-    S_C = 1.0 + K1 * C1
-    S_H = 1.0 + K2 * C1
-
-    return np.sqrt((deltaL / (kL * S_L)) ** 2 + (deltaC / (kC * S_C)) ** 2 + (deltaH_sq / (kH * S_H) ** 2))
+    sample = np.asarray(lab_sample, dtype=np.float64).reshape(1, 3)
+    targets = np.asarray(lab_array, dtype=np.float64)
+    return lab_distance_matrix(sample, targets, metric="CIE94").reshape(-1)
 
 
 def ciede2000(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
@@ -163,56 +272,6 @@ def ciede2000(lab_sample: np.ndarray, lab_array: np.ndarray) -> np.ndarray:
     lab_sample: shape (3,)
     lab_array: shape (N, 3)
     """
-    L1, a1, b1 = lab_sample.astype(np.float64)
-    L2 = lab_array[:, 0].astype(np.float64)
-    a2 = lab_array[:, 1].astype(np.float64)
-    b2 = lab_array[:, 2].astype(np.float64)
-
-    avg_L = (L1 + L2) / 2.0
-    C1 = np.sqrt(a1 ** 2 + b1 ** 2)
-    C2 = np.sqrt(a2 ** 2 + b2 ** 2)
-    avg_C = (C1 + C2) / 2.0
-    G = 0.5 * (1 - np.sqrt((avg_C ** 7) / (avg_C ** 7 + 25 ** 7)))
-    a1p = (1 + G) * a1
-    a2p = (1 + G) * a2
-    C1p = np.sqrt(a1p ** 2 + b1 ** 2)
-    C2p = np.sqrt(a2p ** 2 + b2 ** 2)
-    avg_Cp = (C1p + C2p) / 2.0
-
-    h1p = np.degrees(np.arctan2(b1, a1p))
-    h1p = np.where(h1p < 0, h1p + 360, h1p)
-    h2p = np.degrees(np.arctan2(b2, a2p))
-    h2p = np.where(h2p < 0, h2p + 360, h2p)
-
-    deltahp = h2p - h1p
-    deltahp = np.where(deltahp > 180, deltahp - 360, deltahp)
-    deltahp = np.where(deltahp < -180, deltahp + 360, deltahp)
-
-    deltaLp = L2 - L1
-    deltaCp = C2p - C1p
-    deltaHp = 2 * np.sqrt(C1p * C2p) * np.sin(np.radians(deltahp) / 2.0)
-
-    avg_Hp = (h1p + h2p) / 2.0
-    avg_Hp = np.where(np.abs(h1p - h2p) > 180, avg_Hp + 180, avg_Hp)
-    avg_Hp = np.where(avg_Hp >= 360, avg_Hp - 360, avg_Hp)
-
-    T = (
-        1
-        - 0.17 * np.cos(np.radians(avg_Hp - 30))
-        + 0.24 * np.cos(np.radians(2 * avg_Hp))
-        + 0.32 * np.cos(np.radians(3 * avg_Hp + 6))
-        - 0.20 * np.cos(np.radians(4 * avg_Hp - 63))
-    )
-
-    Sl = 1 + (0.015 * (avg_L - 50) ** 2) / np.sqrt(20 + (avg_L - 50) ** 2)
-    Sc = 1 + 0.045 * avg_Cp
-    Sh = 1 + 0.015 * avg_Cp * T
-
-    delta_theta = 30 * np.exp(-((avg_Hp - 275) / 25) ** 2)
-    Rc = 2 * np.sqrt((avg_Cp ** 7) / (avg_Cp ** 7 + 25 ** 7))
-    Rt = -np.sin(2 * np.radians(delta_theta)) * Rc
-
-    deltaE = np.sqrt(
-        (deltaLp / Sl) ** 2 + (deltaCp / Sc) ** 2 + (deltaHp / Sh) ** 2 + Rt * (deltaCp / Sc) * (deltaHp / Sh)
-    )
-    return deltaE
+    sample = np.asarray(lab_sample, dtype=np.float64).reshape(1, 3)
+    targets = np.asarray(lab_array, dtype=np.float64)
+    return lab_distance_matrix(sample, targets, metric="CIEDE2000").reshape(-1)

@@ -56,6 +56,7 @@ class PreviewMixin:
         if self._showing_prev:
             self._showing_prev = False
             self._refresh_previews()
+            return
 
     def _on_preview_resize(self: "BeadsApp", _event: tk.Event) -> None:
         self._refresh_previews()

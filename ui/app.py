@@ -65,8 +65,6 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.physical_size_var = tk.StringVar(value="完成サイズ: 幅・高さを入力してください")
         self.plate_requirement_var = tk.StringVar(value="28×28プレート: 幅・高さを入力してください")
         self.original_size: Optional[tuple[int, int]] = None
-        self.cancel_event: Optional[threading.Event] = None
-        self.worker_thread: Optional[threading.Thread] = None
         self._start_time: Optional[float] = None
         self.status_var = tk.StringVar(value="")
         self.width_var = tk.StringVar(value="")

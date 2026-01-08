@@ -6,6 +6,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
+from .scale_utils import calc_scale_value_from_pointer
+
 if TYPE_CHECKING:
     from .app import BeadsApp
 
@@ -594,12 +596,7 @@ class LayoutMixin:
     def _set_scale_by_pointer(
         self, event: "tk.Event", var: tk.Variable, on_change: callable
     ) -> str:
-        scale: ttk.Scale = event.widget  # type: ignore[assignment]
-        width = max(1, scale.winfo_width())
-        fraction = max(0.0, min(1.0, event.x / width))
-        min_val = float(scale.cget("from"))
-        max_val = float(scale.cget("to"))
-        new_val = min_val + (max_val - min_val) * fraction
+        new_val = calc_scale_value_from_pointer(event)
         var.set(new_val)
         on_change()
         return "break"
