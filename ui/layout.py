@@ -111,8 +111,212 @@ class LayoutMixin:
         self.noise_reset_button = ttk.Button(btn_row, text="リセット", command=self.reset_noise_reduction)
         self.noise_reset_button.grid(row=0, column=1, padx=(4, 0), pady=2, sticky="we")
 
+        maps_frame = ttk.LabelFrame(control_frame, text="マップ補助（ノーマル/AO/Specular/Displacement）")
+        maps_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="we")
+        maps_frame.columnconfigure(0, weight=1)
+        maps_header = ttk.Frame(maps_frame)
+        maps_header.grid(row=0, column=0, padx=2, pady=(0, 2), sticky="we")
+        maps_header.columnconfigure(0, weight=1)
+        ttk.Label(maps_header, text="詳細").grid(row=0, column=0, padx=2, pady=2, sticky="w")
+        ttk.Checkbutton(
+            maps_header,
+            text="表示",
+            variable=self.map_detail_var,
+            command=self._apply_map_detail_visibility,
+        ).grid(row=0, column=1, padx=2, pady=2, sticky="e")
+        maps_content = ttk.Frame(maps_frame)
+        maps_content.grid(row=1, column=0, padx=2, pady=2, sticky="we")
+        maps_content.columnconfigure(0, weight=1)
+        self.maps_content = maps_content
+        maps_tabs = ttk.Notebook(maps_content)
+        maps_tabs.grid(row=0, column=0, sticky="we")
+        self.maps_tabs = maps_tabs
+        maps_hint = ttk.Label(maps_frame, text="詳細は非表示です。", foreground="#666")
+        maps_hint.grid(row=2, column=0, padx=2, pady=(0, 2), sticky="w")
+        self.maps_hint = maps_hint
+
+        normal_frame = ttk.Frame(maps_tabs)
+        normal_frame.columnconfigure(1, weight=1)
+        maps_tabs.add(normal_frame, text="ノーマル")
+        ttk.Button(normal_frame, text="ノーマルマップ選択", command=self.select_normal_map).grid(
+            row=0, column=0, padx=4, pady=4, sticky="w"
+        )
+        ttk.Label(normal_frame, textvariable=self.normal_map_label).grid(
+            row=0, column=1, padx=4, pady=4, sticky="w"
+        )
+        ttk.Checkbutton(normal_frame, text="陰影を有効化", variable=self.normal_enabled_var).grid(
+            row=1, column=0, columnspan=2, padx=4, pady=2, sticky="w"
+        )
+        ttk.Checkbutton(
+            normal_frame,
+            text="詳細を表示",
+            variable=self.normal_detail_var,
+            command=self._apply_normal_detail_visibility,
+        ).grid(row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w")
+        normal_detail_frame = ttk.Frame(normal_frame)
+        normal_detail_frame.grid(row=3, column=0, columnspan=2, padx=0, pady=0, sticky="we")
+        normal_detail_frame.columnconfigure(1, weight=1)
+        self.normal_detail_frame = normal_detail_frame
+        ttk.Checkbutton(normal_detail_frame, text="Y反転", variable=self.normal_invert_y_var).grid(
+            row=0, column=0, columnspan=2, padx=4, pady=2, sticky="w"
+        )
+        ttk.Label(normal_detail_frame, text="強さ").grid(row=1, column=0, padx=4, pady=2, sticky="e")
+        normal_strength_scale = ttk.Scale(
+            normal_detail_frame,
+            from_=0.0,
+            to=2.0,
+            orient="horizontal",
+            variable=self.normal_strength_var,
+            length=140,
+        )
+        normal_strength_scale.grid(row=1, column=1, padx=4, pady=2, sticky="we")
+        ttk.Label(normal_detail_frame, text="環境光").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        normal_ambient_scale = ttk.Scale(
+            normal_detail_frame,
+            from_=0.0,
+            to=1.0,
+            orient="horizontal",
+            variable=self.normal_ambient_var,
+            length=140,
+        )
+        normal_ambient_scale.grid(row=2, column=1, padx=4, pady=2, sticky="we")
+        ttk.Label(normal_detail_frame, text="ガンマ").grid(row=3, column=0, padx=4, pady=2, sticky="e")
+        normal_gamma_scale = ttk.Scale(
+            normal_detail_frame,
+            from_=0.5,
+            to=2.0,
+            orient="horizontal",
+            variable=self.normal_gamma_var,
+            length=140,
+        )
+        normal_gamma_scale.grid(row=3, column=1, padx=4, pady=2, sticky="we")
+        ttk.Label(normal_detail_frame, text="光方向 X/Y/Z").grid(row=4, column=0, padx=4, pady=2, sticky="e")
+        dir_frame = ttk.Frame(normal_detail_frame)
+        dir_frame.grid(row=4, column=1, padx=4, pady=2, sticky="w")
+        ttk.Spinbox(
+            dir_frame, from_=-1.0, to=1.0, increment=0.05, textvariable=self.normal_light_x_var, width=6
+        ).grid(row=0, column=0, padx=(0, 2))
+        ttk.Spinbox(
+            dir_frame, from_=-1.0, to=1.0, increment=0.05, textvariable=self.normal_light_y_var, width=6
+        ).grid(row=0, column=1, padx=(0, 2))
+        ttk.Spinbox(
+            dir_frame, from_=-1.0, to=1.0, increment=0.05, textvariable=self.normal_light_z_var, width=6
+        ).grid(row=0, column=2)
+        ttk.Label(normal_detail_frame, text="方向パッド").grid(row=5, column=0, padx=4, pady=2, sticky="e")
+        pad_canvas = tk.Canvas(
+            normal_detail_frame,
+            width=110,
+            height=110,
+            highlightthickness=1,
+            highlightbackground="#bbb",
+            background="#f8f8f8",
+        )
+        pad_canvas.grid(row=5, column=1, padx=4, pady=(4, 2), sticky="w")
+        pad_canvas.bind("<ButtonPress-1>", self._on_light_pad_drag)
+        pad_canvas.bind("<B1-Motion>", self._on_light_pad_drag)
+        self.normal_light_pad_canvas = pad_canvas
+        help_label = ttk.Label(normal_detail_frame, text="中心=正面 / 外周=横方向（Z自動）", foreground="#666")
+        help_label.grid(
+            row=6, column=1, padx=4, pady=(0, 4), sticky="w"
+        )
+        self._normal_help_label = help_label
+        if hasattr(self, "_init_light_direction_pad"):
+            self._init_light_direction_pad()
+
+        ao_frame = ttk.Frame(maps_tabs)
+        ao_frame.columnconfigure(1, weight=1)
+        maps_tabs.add(ao_frame, text="AO")
+        ttk.Button(ao_frame, text="AOマップ選択", command=self.select_ao_map).grid(
+            row=0, column=0, padx=4, pady=4, sticky="w"
+        )
+        ttk.Label(ao_frame, textvariable=self.ao_map_label).grid(
+            row=0, column=1, padx=4, pady=4, sticky="w"
+        )
+        ttk.Checkbutton(ao_frame, text="AOを有効化", variable=self.ao_enabled_var).grid(
+            row=1, column=0, columnspan=2, padx=4, pady=2, sticky="w"
+        )
+        ttk.Label(ao_frame, text="強さ").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        ao_strength_scale = ttk.Scale(
+            ao_frame,
+            from_=0.0,
+            to=1.0,
+            orient="horizontal",
+            variable=self.ao_strength_var,
+            length=140,
+        )
+        ao_strength_scale.grid(row=2, column=1, padx=4, pady=2, sticky="we")
+
+        spec_frame = ttk.Frame(maps_tabs)
+        spec_frame.columnconfigure(1, weight=1)
+        maps_tabs.add(spec_frame, text="Specular")
+        ttk.Button(spec_frame, text="Specularマップ選択", command=self.select_specular_map).grid(
+            row=0, column=0, padx=4, pady=4, sticky="w"
+        )
+        ttk.Label(spec_frame, textvariable=self.specular_map_label).grid(
+            row=0, column=1, padx=4, pady=4, sticky="w"
+        )
+        ttk.Checkbutton(spec_frame, text="Specularを有効化", variable=self.specular_enabled_var).grid(
+            row=1, column=0, columnspan=2, padx=4, pady=2, sticky="w"
+        )
+        ttk.Label(spec_frame, text="強さ").grid(row=2, column=0, padx=4, pady=2, sticky="e")
+        spec_strength_scale = ttk.Scale(
+            spec_frame,
+            from_=0.0,
+            to=2.0,
+            orient="horizontal",
+            variable=self.specular_strength_var,
+            length=140,
+        )
+        spec_strength_scale.grid(row=2, column=1, padx=4, pady=2, sticky="we")
+        ttk.Label(spec_frame, text="鋭さ").grid(row=3, column=0, padx=4, pady=2, sticky="e")
+        spec_shininess_scale = ttk.Scale(
+            spec_frame,
+            from_=1.0,
+            to=64.0,
+            orient="horizontal",
+            variable=self.specular_shininess_var,
+            length=140,
+        )
+        spec_shininess_scale.grid(row=3, column=1, padx=4, pady=2, sticky="we")
+
+        disp_frame = ttk.Frame(maps_tabs)
+        disp_frame.columnconfigure(1, weight=1)
+        maps_tabs.add(disp_frame, text="Displacement")
+        ttk.Button(disp_frame, text="Displacementマップ選択", command=self.select_displacement_map).grid(
+            row=0, column=0, padx=4, pady=4, sticky="w"
+        )
+        ttk.Label(disp_frame, textvariable=self.displacement_map_label).grid(
+            row=0, column=1, padx=4, pady=4, sticky="w"
+        )
+        ttk.Checkbutton(disp_frame, text="Displacementを有効化", variable=self.displacement_enabled_var).grid(
+            row=1, column=0, columnspan=2, padx=4, pady=2, sticky="w"
+        )
+        ttk.Checkbutton(disp_frame, text="反転", variable=self.displacement_invert_var).grid(
+            row=2, column=0, columnspan=2, padx=4, pady=2, sticky="w"
+        )
+        ttk.Label(disp_frame, text="強さ").grid(row=3, column=0, padx=4, pady=2, sticky="e")
+        disp_strength_scale = ttk.Scale(
+            disp_frame,
+            from_=0.0,
+            to=2.0,
+            orient="horizontal",
+            variable=self.displacement_strength_var,
+            length=140,
+        )
+        disp_strength_scale.grid(row=3, column=1, padx=4, pady=2, sticky="we")
+        ttk.Label(disp_frame, text="中心").grid(row=4, column=0, padx=4, pady=2, sticky="e")
+        disp_midpoint_scale = ttk.Scale(
+            disp_frame,
+            from_=0.0,
+            to=1.0,
+            orient="horizontal",
+            variable=self.displacement_midpoint_var,
+            length=140,
+        )
+        disp_midpoint_scale.grid(row=4, column=1, padx=4, pady=2, sticky="we")
+
         mode_frame = ttk.LabelFrame(control_frame, text="変換モード")
-        mode_frame.grid(row=2, column=0, padx=4, pady=(0, 6), sticky="we")
+        mode_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
         mode_frame.columnconfigure(1, weight=1)
         ttk.Label(mode_frame, text="モード").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         self.mode_var = tk.StringVar(value="Oklab")
@@ -156,7 +360,7 @@ class LayoutMixin:
         self._build_cmc_sliders(cmc_frame)
 
         size_frame = ttk.LabelFrame(control_frame, text="出力サイズ")
-        size_frame.grid(row=3, column=0, padx=4, pady=(0, 6), sticky="we")
+        size_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
         size_frame.columnconfigure(1, weight=1)
         ttk.Label(size_frame, text="幅(px)").grid(row=0, column=0, padx=4, pady=4, sticky="e")
         ttk.Spinbox(size_frame, from_=1, to=2048, textvariable=self.width_var, width=8).grid(
@@ -185,7 +389,12 @@ class LayoutMixin:
             aspect_row, text="比率固定", variable=self.lock_aspect_var, command=self._on_aspect_toggle
         ).grid(row=0, column=0, padx=(0, 8), sticky="w")
         ttk.Button(aspect_row, text="1/2", command=self._halve_size).grid(row=0, column=1, padx=(0, 4), sticky="w")
-        ttk.Button(aspect_row, text="リセット", command=self._reset_size).grid(row=0, column=2, padx=(0, 4), sticky="w")
+        ttk.Button(aspect_row, text="リセット", command=self._reset_size).grid(
+            row=0, column=2, padx=(0, 4), sticky="w"
+        )
+        ttk.Button(aspect_row, text="5×5に合わせる", command=self._fit_size_to_plate_limit).grid(
+            row=0, column=3, padx=(0, 4), sticky="w"
+        )
 
         ttk.Label(size_frame, textvariable=self.physical_size_var, foreground="#333").grid(
             row=4, column=0, columnspan=2, padx=4, pady=(0, 2), sticky="w"
@@ -195,7 +404,7 @@ class LayoutMixin:
         )
 
         progress_frame = ttk.Frame(control_frame)
-        progress_frame.grid(row=4, column=0, padx=4, pady=(0, 6), sticky="we")
+        progress_frame.grid(row=5, column=0, padx=4, pady=(0, 6), sticky="we")
         progress_frame.columnconfigure(0, weight=1)
         self.progress_label = ttk.Label(progress_frame, text="進捗: 0% (経過 0.0s)")
         self.progress_label.grid(row=0, column=0, padx=4, pady=(0, 2), sticky="w")
@@ -208,8 +417,17 @@ class LayoutMixin:
             state="disabled",
         )
         self.color_usage_button.grid(row=0, column=2, padx=(8, 0), pady=(0, 2), sticky="e")
+        self.preview_3d_button = ttk.Button(
+            progress_frame,
+            text="3Dプレビュー（試作）",
+            command=self.open_3d_preview,
+            state="disabled",
+        )
+        self.preview_3d_button.grid(row=0, column=3, padx=(8, 0), pady=(0, 2), sticky="e")
         self.progress_bar = ttk.Progressbar(progress_frame, length=200)
-        self.progress_bar.grid(row=1, column=0, columnspan=3, padx=4, pady=(0, 2), sticky="we")
+        self.progress_bar.grid(row=1, column=0, columnspan=4, padx=4, pady=(0, 2), sticky="we")
+        self._configure_progress_styles()
+        self.progress_bar.configure(style=self._progress_style_default)
 
         self.diff_label = ttk.Label(
             control_frame,
@@ -220,10 +438,10 @@ class LayoutMixin:
             foreground="#444",
             padding=(4, 2),
         )
-        self.diff_label.grid(row=5, column=0, padx=4, pady=(0, 5), sticky="we")
+        self.diff_label.grid(row=6, column=0, padx=4, pady=(0, 5), sticky="we")
 
         log_frame = ttk.LabelFrame(control_frame, text="処理ログ")
-        log_frame.grid(row=6, column=0, padx=4, pady=(0, 6), sticky="we")
+        log_frame.grid(row=7, column=0, padx=4, pady=(0, 6), sticky="we")
         log_frame.columnconfigure(0, weight=1)
         self.log_label = ttk.Label(
             log_frame,
@@ -237,6 +455,23 @@ class LayoutMixin:
         self.log_label.grid(row=0, column=0, padx=2, pady=2, sticky="we")
 
         self._update_mode_frames()
+        # 初期状態のノーマル詳細表示を反映する
+        self._apply_normal_detail_visibility()
+        # 初期状態のマップ詳細表示を反映する
+        self._apply_map_detail_visibility()
+
+    def _configure_progress_styles(self: "BeadsApp") -> None:
+        """進捗バーの色設定を初期化する。"""
+        style = ttk.Style(self.root)
+        # テーマによっては色変更が効かない場合がある
+        style.configure(
+            self._progress_style_noise,
+            troughcolor="#f8f2d6",
+            background="#f1c40f",
+            bordercolor="#d4a10b",
+            lightcolor="#f6d365",
+            darkcolor="#d4a10b",
+        )
 
     def _build_rgb_sliders(self: "BeadsApp", frame: ttk.Frame) -> None:
         ttk.Label(frame, text="R 重み").grid(row=0, column=0, padx=4, pady=4, sticky="e")
@@ -341,6 +576,33 @@ class LayoutMixin:
         ttk.Button(btn_row, text="CMCリセット", command=self.reset_cmc_weights).grid(
             row=0, column=1, padx=(4, 0), sticky="we"
         )
+
+    def _apply_normal_detail_visibility(self: "BeadsApp") -> None:
+        """ノーマルマップの詳細UIを表示/非表示にする。"""
+        detail_frame = getattr(self, "normal_detail_frame", None)
+        if detail_frame is None:
+            return
+        if self.normal_detail_var.get():
+            detail_frame.grid()
+            if hasattr(self, "_draw_light_pad_base"):
+                self._draw_light_pad_base()
+            if hasattr(self, "_update_light_pad_from_vars"):
+                self._update_light_pad_from_vars()
+        else:
+            detail_frame.grid_remove()
+
+    def _apply_map_detail_visibility(self: "BeadsApp") -> None:
+        """マップ補助全体の詳細UIを表示/非表示にする。"""
+        content = getattr(self, "maps_content", None)
+        hint = getattr(self, "maps_hint", None)
+        if content is None or hint is None:
+            return
+        if self.map_detail_var.get():
+            content.grid()
+            hint.grid_remove()
+        else:
+            content.grid_remove()
+            hint.grid()
 
     def _on_mode_changed(self: "BeadsApp") -> None:
         self._update_mode_frames()

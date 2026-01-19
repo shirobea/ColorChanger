@@ -17,12 +17,12 @@ def _require_cv2():
     return cv2
 
 
-def _imread_unicode(path: str) -> np.ndarray | None:
+def _imread_unicode(path: str, flags: int) -> np.ndarray | None:
     """Unicodeパスでも安全に画像を読み込む。"""
     try:
         cv2 = _require_cv2()
         data = np.fromfile(path, dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(data, flags)
         return img
     except Exception:
         return None
@@ -33,10 +33,62 @@ def _load_image_rgb(input_path: str) -> np.ndarray:
     cv2 = _require_cv2()
     image_bgr = cv2.imread(input_path, cv2.IMREAD_COLOR)
     if image_bgr is None:
-        image_bgr = _imread_unicode(input_path)
+        image_bgr = _imread_unicode(input_path, cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise ValueError("入力画像を読み込めませんでした。")
     return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+
+def _load_normal_map_rgb(input_path: str) -> np.ndarray:
+    """ノーマルマップをRGBで読み込む（グレースケールでも3ch化）。"""
+    rgb = _load_image_rgb(input_path)
+    if rgb.ndim == 2:
+        rgb = np.stack([rgb, rgb, rgb], axis=2)
+    if rgb.shape[2] > 3:
+        rgb = rgb[:, :, :3]
+    return rgb
+
+
+def _load_ao_map_gray(input_path: str) -> np.ndarray:
+    """AOマップを0-1のグレースケールに変換して返す。"""
+    rgb = _load_image_rgb(input_path)
+    if rgb.ndim == 2:
+        gray = rgb.astype(np.float32)
+    else:
+        if rgb.shape[2] > 3:
+            rgb = rgb[:, :, :3]
+        rgb_f = rgb.astype(np.float32)
+        gray = 0.299 * rgb_f[:, :, 0] + 0.587 * rgb_f[:, :, 1] + 0.114 * rgb_f[:, :, 2]
+    return np.clip(gray / 255.0, 0.0, 1.0)
+
+
+def _load_specular_map_gray(input_path: str) -> np.ndarray:
+    """Specularマップを0-1のグレースケールに変換して返す。"""
+    return _load_ao_map_gray(input_path)
+
+
+def _load_displacement_map_gray(input_path: str) -> np.ndarray:
+    """Displacementマップを0-1のグレースケールに変換して返す。"""
+    cv2 = _require_cv2()
+    raw = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        raw = _imread_unicode(input_path, cv2.IMREAD_UNCHANGED)
+    if raw is None:
+        raise ValueError("Displacementマップを読み込めませんでした。")
+    if raw.ndim == 2:
+        gray = raw.astype(np.float32)
+    else:
+        if raw.shape[2] > 3:
+            raw = raw[:, :, :3]
+        raw_f = raw.astype(np.float32)
+        gray = 0.299 * raw_f[:, :, 0] + 0.587 * raw_f[:, :, 1] + 0.114 * raw_f[:, :, 2]
+    if np.issubdtype(gray.dtype, np.integer):
+        max_val = float(np.iinfo(gray.dtype).max)
+    else:
+        max_val = float(np.max(gray)) if gray.size else 1.0
+    if max_val <= 0.0:
+        max_val = 1.0
+    return np.clip(gray / max_val, 0.0, 1.0)
 
 
 def _compute_resize(

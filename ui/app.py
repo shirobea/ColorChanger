@@ -21,6 +21,7 @@ from .layout import LayoutMixin
 from .actions import ActionsMixin
 from .state import StateMixin
 from .preview import PreviewMixin
+from .scale_utils import bind_scale_click_jump
 
 
 class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
@@ -28,10 +29,12 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
 
     PIXEL_SIZE_MM = 2.6
     PLATE_PIXELS = 28
+    MAX_PLATES = 5
 
     def __init__(self, root: tk.Tk, palette: BeadPalette) -> None:
         self.root = root
         self.palette = palette
+        bind_scale_click_jump(root)
         self._window_state_path = Path(__file__).resolve().parent / "window_state.json"
         self._settings_path = Path(__file__).resolve().parent / "settings.json"
         self._saved_mode: Optional[str] = None  # 前回選択したモードを保持
@@ -58,6 +61,7 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.color_usage: list[dict] = []
         self._color_usage_base_image: Optional[np.ndarray] = None
         self._color_usage_window = None
+        self._preview_3d_window = None  # 3Dプレビューウィンドウの参照
         self._color_usage_selected_rgb: Optional[tuple[int, int, int]] = None
         self.color_usage_tone_var = tk.DoubleVar(value=0.85)
         self.color_usage_tone_display = tk.StringVar(value="")
@@ -66,6 +70,16 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.plate_requirement_var = tk.StringVar(value="28×28プレート: 幅・高さを入力してください")
         self.original_size: Optional[tuple[int, int]] = None
         self._start_time: Optional[float] = None
+        # ノイズ除去の疑似進捗表示に使う状態
+        self._noise_progress_start: Optional[float] = None
+        self._noise_progress_value: float = 0.0
+        self._noise_progress_after_id: Optional[str] = None
+        self._progress_style_default = "Horizontal.TProgressbar"
+        self._progress_style_noise = "Noise.Horizontal.TProgressbar"
+        # 進捗を「変換」と「表示準備」に分けて扱う
+        self._conversion_progress_range = (0.0, 0.85)
+        self._ui_progress_range = (0.85, 1.0)
+        self._conversion_progress_last = 0.0
         self.status_var = tk.StringVar(value="")
         self.width_var = tk.StringVar(value="")
         self.height_var = tk.StringVar(value="")
@@ -85,6 +99,39 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self.lab_metric_var = tk.StringVar(value="CIEDE2000")
         self.noise_filter_var = tk.StringVar(value="メディアン")
         self.noise_filter_size_var = tk.IntVar(value=3)
+        self.normal_map_path: Optional[Path] = None
+        self.normal_map_label = tk.StringVar(value="未選択")
+        self.normal_enabled_var = tk.BooleanVar(value=False)
+        self.normal_invert_y_var = tk.BooleanVar(value=False)
+        self.normal_strength_var = tk.DoubleVar(value=0.6)
+        self.normal_ambient_var = tk.DoubleVar(value=0.25)
+        self.normal_gamma_var = tk.DoubleVar(value=1.0)
+        self.normal_light_x_var = tk.DoubleVar(value=0.2)
+        self.normal_light_y_var = tk.DoubleVar(value=-0.2)
+        self.normal_light_z_var = tk.DoubleVar(value=0.95)
+        self.normal_light_pad_canvas: Optional[tk.Canvas] = None
+        self._light_pad_center = (0.0, 0.0)
+        self._light_pad_radius = 0.0
+        self._light_pad_handle: Optional[int] = None
+        self.ao_map_path: Optional[Path] = None
+        self.ao_map_label = tk.StringVar(value="未選択")
+        self.ao_enabled_var = tk.BooleanVar(value=False)
+        self.ao_strength_var = tk.DoubleVar(value=0.6)
+        self.specular_map_path: Optional[Path] = None
+        self.specular_map_label = tk.StringVar(value="未選択")
+        self.specular_enabled_var = tk.BooleanVar(value=False)
+        self.specular_strength_var = tk.DoubleVar(value=0.6)
+        self.specular_shininess_var = tk.DoubleVar(value=24.0)
+        self.displacement_map_path: Optional[Path] = None
+        self.displacement_map_label = tk.StringVar(value="未選択")
+        self.displacement_enabled_var = tk.BooleanVar(value=False)
+        self.displacement_strength_var = tk.DoubleVar(value=0.6)
+        self.displacement_midpoint_var = tk.DoubleVar(value=0.5)
+        self.displacement_invert_var = tk.BooleanVar(value=False)
+        self.normal_detail_var = tk.BooleanVar(value=False)
+        self.map_detail_var = tk.BooleanVar(value=True)
+        self._input_shaded_pil: Optional[Image.Image] = None
+        self._input_shading_after_id: Optional[str] = None
         self._updating_size_fields = False
         self._noise_busy = False
         self._closing = False  # 終了処理中フラグ
@@ -93,10 +140,134 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
         self._runner = ConversionRunner(self._schedule_on_ui, lambda: self._closing)
         self.color_usage_tone_var.trace_add("write", lambda *_: self._on_color_usage_tone_change())
         self._on_color_usage_tone_change()
+        self._setup_shading_watchers()
+        self.normal_light_x_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
+        self.normal_light_y_var.trace_add("write", lambda *_: self._update_light_pad_from_vars())
 
         self._load_settings()
+        self.normal_detail_var.trace_add("write", lambda *_: self._save_settings())
+        self.map_detail_var.trace_add("write", lambda *_: self._save_settings())
         self._build_layout()
         self._apply_saved_settings()
+
+    def _setup_shading_watchers(self) -> None:
+        """ノーマル/AO/Specular/Displacementの変更を入力プレビューへ即時反映する。"""
+        for var in (
+            self.normal_enabled_var,
+            self.normal_invert_y_var,
+            self.normal_strength_var,
+            self.normal_ambient_var,
+            self.normal_gamma_var,
+            self.normal_light_x_var,
+            self.normal_light_y_var,
+            self.normal_light_z_var,
+            self.ao_enabled_var,
+            self.ao_strength_var,
+            self.specular_enabled_var,
+            self.specular_strength_var,
+            self.specular_shininess_var,
+            self.displacement_enabled_var,
+            self.displacement_strength_var,
+            self.displacement_midpoint_var,
+            self.displacement_invert_var,
+        ):
+            try:
+                var.trace_add("write", lambda *_: self._request_input_shading_update())
+            except Exception:
+                pass
+
+    def _init_light_direction_pad(self) -> None:
+        """方向パッドのベース描画と初期位置を更新する。"""
+        if self.normal_light_pad_canvas is None:
+            return
+        self._draw_light_pad_base()
+        self._update_light_pad_from_vars()
+
+    def _draw_light_pad_base(self) -> None:
+        """方向パッドの円とガイド線を描く。"""
+        canvas = self.normal_light_pad_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        size = int(canvas.cget("width")) or 110
+        center = size / 2.0
+        pad = 6.0
+        radius = max(10.0, center - pad)
+        self._light_pad_center = (center, center)
+        self._light_pad_radius = radius
+        # 十字と円で方向を分かりやすくする
+        canvas.create_oval(
+            center - radius,
+            center - radius,
+            center + radius,
+            center + radius,
+            outline="#888",
+            fill="#f8f8f8",
+        )
+        canvas.create_line(center - radius, center, center + radius, center, fill="#bbb")
+        canvas.create_line(center, center - radius, center, center + radius, fill="#bbb")
+        self._light_pad_handle = canvas.create_oval(
+            center - 4,
+            center - 4,
+            center + 4,
+            center + 4,
+            fill="#ff9800",
+            outline="#cc7a00",
+        )
+
+    def _update_light_pad_from_vars(self) -> None:
+        """X/Yの数値から方向パッドのつまみ位置を更新する。"""
+        canvas = self.normal_light_pad_canvas
+        if canvas is None or self._light_pad_radius <= 0.0:
+            return
+        try:
+            x_val = float(self.normal_light_x_var.get())
+            y_val = float(self.normal_light_y_var.get())
+        except Exception:
+            return
+        x_val = max(-1.0, min(1.0, x_val))
+        y_val = max(-1.0, min(1.0, y_val))
+        # 単位円から外れる場合は縮めて表示する
+        length = (x_val * x_val + y_val * y_val) ** 0.5
+        if length > 1.0:
+            x_val /= length
+            y_val /= length
+        cx, cy = self._light_pad_center
+        px = cx + x_val * self._light_pad_radius
+        py = cy - y_val * self._light_pad_radius
+        r = 4
+        if self._light_pad_handle is not None:
+            canvas.coords(self._light_pad_handle, px - r, py - r, px + r, py + r)
+
+    def _on_light_pad_drag(self, event: tk.Event) -> str:
+        """方向パッド上のドラッグで光の向きを更新する。"""
+        canvas = self.normal_light_pad_canvas
+        if canvas is None:
+            return "break"
+        if self._light_pad_radius <= 0.0:
+            self._draw_light_pad_base()
+        cx, cy = self._light_pad_center
+        dx = event.x - cx
+        dy = event.y - cy
+        length = (dx * dx + dy * dy) ** 0.5
+        if length > self._light_pad_radius and length > 0.0:
+            scale = self._light_pad_radius / length
+            dx *= scale
+            dy *= scale
+        x_val = dx / self._light_pad_radius
+        y_val = -dy / self._light_pad_radius
+        # 現在のZ符号を保ちつつ、球面上でZを補完する
+        try:
+            current_z = float(self.normal_light_z_var.get())
+        except Exception:
+            current_z = 1.0
+        sign = -1.0 if current_z < 0.0 else 1.0
+        z_val = sign * max(0.0, 1.0 - x_val * x_val - y_val * y_val) ** 0.5
+        self.normal_light_x_var.set(round(x_val, 3))
+        self.normal_light_y_var.set(round(y_val, 3))
+        self.normal_light_z_var.set(round(z_val, 3))
+        self._update_light_pad_from_vars()
+        return "break"
 
     # --- 設定復元と差分表示 ---
     def _apply_saved_settings(self) -> None:
@@ -158,6 +329,118 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
                 self.rgb_b_display.set(f"{max(0.5, min(2.0, b)):.1f}")
         except Exception:
             pass
+        # 有効化チェックは起動時は常にオフにする
+        self.normal_enabled_var.set(False)
+        try:
+            invert_y = self.last_settings.get("ノーマルY反転") if self.last_settings else None
+            if invert_y is not None:
+                self.normal_invert_y_var.set(bool(invert_y))
+        except Exception:
+            pass
+        try:
+            strength = self.last_settings.get("ノーマル強さ") if self.last_settings else None
+            if strength is not None:
+                self.normal_strength_var.set(float(strength))
+        except Exception:
+            pass
+        try:
+            ambient = self.last_settings.get("ノーマル環境光") if self.last_settings else None
+            if ambient is not None:
+                self.normal_ambient_var.set(float(ambient))
+        except Exception:
+            pass
+        try:
+            gamma = self.last_settings.get("ノーマルガンマ") if self.last_settings else None
+            if gamma is not None:
+                self.normal_gamma_var.set(float(gamma))
+        except Exception:
+            pass
+        try:
+            light = self.last_settings.get("ノーマル光方向") if self.last_settings else None
+            if isinstance(light, (list, tuple)) and len(light) == 3:
+                self.normal_light_x_var.set(float(light[0]))
+                self.normal_light_y_var.set(float(light[1]))
+                self.normal_light_z_var.set(float(light[2]))
+        except Exception:
+            pass
+        try:
+            normal_path = self.last_settings.get("ノーマルマップ") if self.last_settings else None
+            if isinstance(normal_path, str) and normal_path:
+                path = Path(normal_path)
+                if path.exists():
+                    self.normal_map_path = path
+                    self.normal_map_label.set(path.name)
+        except Exception:
+            pass
+        # 有効化チェックは起動時は常にオフにする
+        self.ao_enabled_var.set(False)
+        try:
+            ao_strength = self.last_settings.get("AO強さ") if self.last_settings else None
+            if ao_strength is not None:
+                self.ao_strength_var.set(float(ao_strength))
+        except Exception:
+            pass
+        try:
+            ao_path = self.last_settings.get("AOマップ") if self.last_settings else None
+            if isinstance(ao_path, str) and ao_path:
+                path = Path(ao_path)
+                if path.exists():
+                    self.ao_map_path = path
+                    self.ao_map_label.set(path.name)
+        except Exception:
+            pass
+        # 有効化チェックは起動時は常にオフにする
+        self.specular_enabled_var.set(False)
+        try:
+            spec_strength = self.last_settings.get("Specular強さ") if self.last_settings else None
+            if spec_strength is not None:
+                self.specular_strength_var.set(float(spec_strength))
+        except Exception:
+            pass
+        try:
+            spec_shine = self.last_settings.get("Specular鋭さ") if self.last_settings else None
+            if spec_shine is not None:
+                self.specular_shininess_var.set(float(spec_shine))
+        except Exception:
+            pass
+        try:
+            spec_path = self.last_settings.get("Specularマップ") if self.last_settings else None
+            if isinstance(spec_path, str) and spec_path:
+                path = Path(spec_path)
+                if path.exists():
+                    self.specular_map_path = path
+                    self.specular_map_label.set(path.name)
+        except Exception:
+            pass
+        # 有効化チェックは起動時は常にオフにする
+        self.displacement_enabled_var.set(False)
+        try:
+            disp_strength = self.last_settings.get("Displacement強さ") if self.last_settings else None
+            if disp_strength is not None:
+                self.displacement_strength_var.set(float(disp_strength))
+        except Exception:
+            pass
+        try:
+            disp_mid = self.last_settings.get("Displacement中心") if self.last_settings else None
+            if disp_mid is not None:
+                self.displacement_midpoint_var.set(float(disp_mid))
+        except Exception:
+            pass
+        try:
+            disp_invert = self.last_settings.get("Displacement反転") if self.last_settings else None
+            if disp_invert is not None:
+                self.displacement_invert_var.set(bool(disp_invert))
+        except Exception:
+            pass
+        try:
+            disp_path = self.last_settings.get("Displacementマップ") if self.last_settings else None
+            if isinstance(disp_path, str) and disp_path:
+                path = Path(disp_path)
+                if path.exists():
+                    self.displacement_map_path = path
+                    self.displacement_map_label.set(path.name)
+        except Exception:
+            pass
         if self.last_settings is not None:
             sanitized_settings = dict(self.last_settings)
             sanitized_settings.setdefault("CMC l", f"{float(self.cmc_l_var.get()):.1f}")
@@ -170,11 +453,43 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
                     float(self.rgb_b_weight_var.get()),
                 ],
             )
+            sanitized_settings["ノーマル有効"] = bool(self.normal_enabled_var.get())
+            sanitized_settings.setdefault("ノーマルY反転", bool(self.normal_invert_y_var.get()))
+            sanitized_settings.setdefault("ノーマル強さ", float(self.normal_strength_var.get()))
+            sanitized_settings.setdefault("ノーマル環境光", float(self.normal_ambient_var.get()))
+            sanitized_settings.setdefault("ノーマルガンマ", float(self.normal_gamma_var.get()))
+            sanitized_settings.setdefault(
+                "ノーマル光方向",
+                [
+                    float(self.normal_light_x_var.get()),
+                    float(self.normal_light_y_var.get()),
+                    float(self.normal_light_z_var.get()),
+                ],
+            )
+            if self.normal_map_path:
+                sanitized_settings.setdefault("ノーマルマップ", str(self.normal_map_path))
+            sanitized_settings["AO有効"] = bool(self.ao_enabled_var.get())
+            sanitized_settings.setdefault("AO強さ", float(self.ao_strength_var.get()))
+            if self.ao_map_path:
+                sanitized_settings.setdefault("AOマップ", str(self.ao_map_path))
+            sanitized_settings["Specular有効"] = bool(self.specular_enabled_var.get())
+            sanitized_settings.setdefault("Specular強さ", float(self.specular_strength_var.get()))
+            sanitized_settings.setdefault("Specular鋭さ", float(self.specular_shininess_var.get()))
+            if self.specular_map_path:
+                sanitized_settings.setdefault("Specularマップ", str(self.specular_map_path))
+            sanitized_settings["Displacement有効"] = bool(self.displacement_enabled_var.get())
+            sanitized_settings.setdefault("Displacement強さ", float(self.displacement_strength_var.get()))
+            sanitized_settings.setdefault("Displacement中心", float(self.displacement_midpoint_var.get()))
+            sanitized_settings.setdefault("Displacement反転", bool(self.displacement_invert_var.get()))
+            if self.displacement_map_path:
+                sanitized_settings.setdefault("Displacementマップ", str(self.displacement_map_path))
             sanitized_settings.setdefault("リサイズ方式", self.resize_method_var.get())
             sanitized_settings.setdefault("モード", self.mode_var.get())
             sanitized_settings.setdefault("Lab距離式", self.lab_metric_var.get())
             self.last_settings = sanitized_settings
         self._update_mode_frames()
+        if hasattr(self, "_request_input_shading_update"):
+            self._request_input_shading_update()
 
     def _build_diff_overlay(self) -> str:
         if not self.last_settings or not self.prev_settings:
@@ -279,6 +594,29 @@ class BeadsApp(LayoutMixin, ActionsMixin, StateMixin, PreviewMixin):
             return
         orig_w, orig_h = self.original_size
         self._set_size_fields(orig_w, orig_h)
+
+    def _fit_size_to_plate_limit(self) -> None:
+        """5×5プレート内に収まるようサイズを調整する。"""
+        if self.original_size:
+            base_w, base_h = self.original_size
+        else:
+            width = self._parse_int(self.width_var.get())
+            height = self._parse_int(self.height_var.get())
+            if not width or not height:
+                self.status_var.set("先に入力画像を選択するか、幅・高さを入力してください。")
+                return
+            base_w, base_h = width, height
+        if base_w <= 0 or base_h <= 0:
+            self.status_var.set("幅・高さは1以上で指定してください。")
+            return
+        max_w = self.PLATE_PIXELS * self.MAX_PLATES
+        max_h = self.PLATE_PIXELS * self.MAX_PLATES
+        # 5×5の最大範囲に収める倍率を計算する
+        scale = min(max_w / base_w, max_h / base_h, 1.0)
+        new_w = max(1, int(round(base_w * scale)))
+        new_h = max(1, int(round(base_h * scale)))
+        self._set_size_fields(new_w, new_h)
+        self.status_var.set("5×5プレートに収まるようサイズを調整しました。")
 
     # --- キーボード/プレビュー ---
     def _on_preview_resize(self, _event: tk.Event) -> None:

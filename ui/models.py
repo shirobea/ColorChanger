@@ -18,3 +18,22 @@ class ConversionRequest:
     keep_aspect: bool
     resize_method: str
     rgb_weights: tuple[float, float, float]
+    normal_map_path: str | None
+    normal_enabled: bool
+    normal_invert_y: bool
+    normal_light_dir: tuple[float, float, float]
+    normal_strength: float
+    normal_ambient: float
+    normal_gamma: float
+    ao_map_path: str | None
+    ao_enabled: bool
+    ao_strength: float
+    specular_map_path: str | None
+    specular_enabled: bool
+    specular_strength: float
+    specular_shininess: float
+    displacement_map_path: str | None
+    displacement_enabled: bool
+    displacement_strength: float
+    displacement_midpoint: float
+    displacement_invert: bool

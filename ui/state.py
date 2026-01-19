@@ -68,6 +68,20 @@ class StateMixin:
             self.last_settings = data.get("last_settings")
             self.prev_settings = data.get("prev_settings")
             self._saved_mode = data.get("selected_mode")
+            if hasattr(self, "normal_detail_var"):
+                detail_raw = data.get("normal_detail_visible")
+                if detail_raw is not None:
+                    try:
+                        self.normal_detail_var.set(bool(detail_raw))
+                    except Exception:
+                        pass
+            if hasattr(self, "map_detail_var"):
+                map_raw = data.get("map_detail_visible")
+                if map_raw is not None:
+                    try:
+                        self.map_detail_var.set(bool(map_raw))
+                    except Exception:
+                        pass
             # 色使用一覧の明暗スライダー値も復元する
             if hasattr(self, "color_usage_tone_var"):
                 tone_raw = data.get("color_usage_tone")
@@ -100,6 +114,16 @@ class StateMixin:
                 "prev_settings": self.prev_settings,
                 "selected_mode": selected_mode,
             }
+            if hasattr(self, "normal_detail_var"):
+                try:
+                    payload["normal_detail_visible"] = bool(self.normal_detail_var.get())
+                except Exception:
+                    pass
+            if hasattr(self, "map_detail_var"):
+                try:
+                    payload["map_detail_visible"] = bool(self.map_detail_var.get())
+                except Exception:
+                    pass
             # 色使用一覧の明暗スライダー値も保存する
             if hasattr(self, "color_usage_tone_var"):
                 try:

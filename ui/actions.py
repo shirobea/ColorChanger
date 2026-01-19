@@ -16,6 +16,7 @@ from .color_usage_window import ColorUsageWindow
 from .color_usage_service import build_color_usage_rows
 from .noise_filters import build_noise_filter_registry
 import numpy as np
+import converter
 
 if TYPE_CHECKING:
     from .app import BeadsApp
@@ -82,6 +83,55 @@ class ActionsMixin:
         if self.mode_var.get() == "全て":
             base_msg += " 全てモードでは色使用一覧は利用できません。"
         self.rgb_log_var.set(base_msg)
+        self._request_input_shading_update(immediate=True)
+
+    def select_normal_map(self: "BeadsApp") -> None:
+        """ノーマルマップを選択して状態に保存する。"""
+        path = filedialog.askopenfilename(
+            title="ノーマルマップを選択",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.normal_map_path = Path(path)
+        self.normal_map_label.set(self.normal_map_path.name)
+        self._request_input_shading_update()
+
+    def select_ao_map(self: "BeadsApp") -> None:
+        """AOマップを選択して状態に保存する。"""
+        path = filedialog.askopenfilename(
+            title="AOマップを選択",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.ao_map_path = Path(path)
+        self.ao_map_label.set(self.ao_map_path.name)
+        self._request_input_shading_update()
+
+    def select_specular_map(self: "BeadsApp") -> None:
+        """Specularマップを選択して状態に保存する。"""
+        path = filedialog.askopenfilename(
+            title="Specularマップを選択",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.specular_map_path = Path(path)
+        self.specular_map_label.set(self.specular_map_path.name)
+        self._request_input_shading_update()
+
+    def select_displacement_map(self: "BeadsApp") -> None:
+        """Displacementマップを選択して状態に保存する。"""
+        path = filedialog.askopenfilename(
+            title="Displacementマップを選択",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.gif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        self.displacement_map_path = Path(path)
+        self.displacement_map_label.set(self.displacement_map_path.name)
+        self._request_input_shading_update()
 
     def _sanitize_kernel_size(self: "BeadsApp", raw_size: object) -> int:
         """メディアン用カーネルサイズを奇数・下限付きで整える。"""
@@ -108,6 +158,68 @@ class ActionsMixin:
                     pass
         if busy:
             self.status_var.set("ノイズ除去を実行中です...")
+
+    def _set_progress_style(self: "BeadsApp", style_name: str) -> None:
+        """進捗バーの表示スタイルを切り替える。"""
+        bar = getattr(self, "progress_bar", None)
+        if not bar:
+            return
+        try:
+            bar.configure(style=style_name)
+        except Exception:
+            pass
+
+    def _cancel_noise_progress_timer(self: "BeadsApp") -> None:
+        """ノイズ除去進捗の更新タイマーを停止する。"""
+        after_id = getattr(self, "_noise_progress_after_id", None)
+        if not after_id:
+            return
+        try:
+            self.root.after_cancel(after_id)
+        except Exception:
+            pass
+        self._noise_progress_after_id = None
+
+    def _update_noise_progress_display(self: "BeadsApp", value: float) -> None:
+        """ノイズ除去用の進捗表示を更新する。"""
+        clamped = max(0.0, min(1.0, value))
+        percent = int(clamped * 100)
+        elapsed = 0.0
+        if self._noise_progress_start is not None:
+            elapsed = time.perf_counter() - self._noise_progress_start
+        self.progress_label.configure(text=f"ノイズ除去: {percent}% (経過 {elapsed:.1f}s)")
+        self.progress_bar["value"] = percent
+
+    def _schedule_noise_progress_tick(self: "BeadsApp") -> None:
+        """ノイズ除去中に疑似的な進捗を進める。"""
+        if not getattr(self, "_noise_busy", False):
+            return
+        self._noise_progress_value = min(0.95, self._noise_progress_value + 0.03)
+        self._update_noise_progress_display(self._noise_progress_value)
+        try:
+            self._noise_progress_after_id = self.root.after(120, self._schedule_noise_progress_tick)
+        except Exception:
+            self._noise_progress_after_id = None
+
+    def _start_noise_progress(self: "BeadsApp") -> None:
+        """ノイズ除去の進捗表示を開始する。"""
+        self._cancel_noise_progress_timer()
+        self._noise_progress_start = time.perf_counter()
+        self._noise_progress_value = 0.0
+        self._set_progress_style(self._progress_style_default)
+        self._update_noise_progress_display(0.0)
+        self._schedule_noise_progress_tick()
+
+    def _finish_noise_progress(self: "BeadsApp", success: bool) -> None:
+        """ノイズ除去の進捗表示を終了する。"""
+        self._cancel_noise_progress_timer()
+        self._set_progress_style(self._progress_style_default)
+        if success:
+            self._noise_progress_value = 1.0
+            self._update_noise_progress_display(1.0)
+        else:
+            self._reset_progress_display()
+        self._noise_progress_start = None
 
     def _get_noise_filter_registry(self: "BeadsApp") -> dict[str, Callable[[Image.Image], Image.Image]]:
         """追加しやすいようフィルタ名と実装を辞書でまとめる。"""
@@ -138,6 +250,7 @@ class ActionsMixin:
             return
 
         self._set_noise_busy(True)
+        self._start_noise_progress()
 
         def _worker() -> None:
             try:
@@ -155,6 +268,7 @@ class ActionsMixin:
 
     def _on_noise_finished(self: "BeadsApp", name: str, filtered: Image.Image) -> None:
         """ノイズ除去成功時のUI反映（UIスレッドで実行）。"""
+        self._finish_noise_progress(True)
         self.input_filtered_pil = filtered
         self.input_pil = filtered
         self._input_using_filtered = True
@@ -162,10 +276,12 @@ class ActionsMixin:
         self.status_var.set(f"{name}フィルタでノイズ除去しました。")
         self.rgb_log_var.set(f"{name}フィルタでノイズ除去しました。")
         self._refresh_previews()
+        self._request_input_shading_update(immediate=True)
         self._set_noise_busy(False)
 
     def _on_noise_failed(self: "BeadsApp", exc: Exception) -> None:
         """ノイズ除去失敗時のUI処理（UIスレッドで実行）。"""
+        self._finish_noise_progress(False)
         messagebox.showerror("ノイズ除去失敗", f"ノイズ除去中にエラーが発生しました:\n{exc}")
         self._set_noise_busy(False)
 
@@ -184,6 +300,7 @@ class ActionsMixin:
         self.status_var.set("入力画像を元に戻しました。")
         self.rgb_log_var.set("ノイズ除去をリセットしました。")
         self._refresh_previews()
+        self._request_input_shading_update(immediate=True)
         self._set_noise_busy(False)
 
     def _on_space_key(self: "BeadsApp", _event: "tk.Event") -> str:
@@ -198,6 +315,73 @@ class ActionsMixin:
         if self.input_pil is None:
             return None
         return np.asarray(self.input_pil.convert("RGB"), dtype=np.uint8)
+
+    def _input_shading_enabled(self: "BeadsApp") -> bool:
+        """ノーマル/AO/Specular/Displacementのどれかが有効か判定する。"""
+        has_normal = bool(self.normal_enabled_var.get()) and self.normal_map_path is not None
+        has_ao = bool(self.ao_enabled_var.get()) and self.ao_map_path is not None
+        has_specular = bool(self.specular_enabled_var.get()) and self.specular_map_path is not None
+        has_disp = bool(self.displacement_enabled_var.get()) and self.displacement_map_path is not None
+        return has_normal or has_ao or has_specular or has_disp
+
+    def _request_input_shading_update(self: "BeadsApp", immediate: bool = False) -> None:
+        """入力プレビューの陰影更新をデバウンスして実行する。"""
+        after_id = getattr(self, "_input_shading_after_id", None)
+        if after_id:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+        if immediate:
+            self._update_input_shading_preview()
+            return
+        try:
+            self._input_shading_after_id = self.root.after(80, self._update_input_shading_preview)
+        except Exception:
+            self._input_shading_after_id = None
+
+    def _update_input_shading_preview(self: "BeadsApp") -> None:
+        """現在のノーマル/AO設定を入力プレビューに反映する。"""
+        self._input_shading_after_id = None
+        if self.input_pil is None:
+            self._input_shaded_pil = None
+            return
+        if not self._input_shading_enabled():
+            self._input_shaded_pil = None
+            self._refresh_previews()
+            return
+        try:
+            base = np.asarray(self.input_pil.convert("RGB"), dtype=np.uint8)
+            shaded = converter.apply_shading_preview(
+                image_rgb=base,
+                normal_map_path=str(self.normal_map_path) if self.normal_map_path else None,
+                normal_enabled=bool(self.normal_enabled_var.get()),
+                normal_invert_y=bool(self.normal_invert_y_var.get()),
+                normal_light_dir=(
+                    float(self.normal_light_x_var.get()),
+                    float(self.normal_light_y_var.get()),
+                    float(self.normal_light_z_var.get()),
+                ),
+                normal_strength=float(self.normal_strength_var.get()),
+                normal_ambient=float(self.normal_ambient_var.get()),
+                normal_gamma=float(self.normal_gamma_var.get()),
+                ao_map_path=str(self.ao_map_path) if self.ao_map_path else None,
+                ao_enabled=bool(self.ao_enabled_var.get()),
+                ao_strength=float(self.ao_strength_var.get()),
+                specular_map_path=str(self.specular_map_path) if self.specular_map_path else None,
+                specular_enabled=bool(self.specular_enabled_var.get()),
+                specular_strength=float(self.specular_strength_var.get()),
+                specular_shininess=float(self.specular_shininess_var.get()),
+                displacement_map_path=str(self.displacement_map_path) if self.displacement_map_path else None,
+                displacement_enabled=bool(self.displacement_enabled_var.get()),
+                displacement_strength=float(self.displacement_strength_var.get()),
+                displacement_midpoint=float(self.displacement_midpoint_var.get()),
+                displacement_invert=bool(self.displacement_invert_var.get()),
+            )
+            self._input_shaded_pil = Image.fromarray(shaded)
+        except Exception:
+            self._input_shaded_pil = None
+        self._refresh_previews()
 
     def start_conversion(self: "BeadsApp") -> None:
         if self._runner.is_running:
@@ -251,6 +435,20 @@ class ActionsMixin:
         r_w = max(0.5, min(2.0, float(self.rgb_r_weight_var.get())))
         g_w = max(0.5, min(2.0, float(self.rgb_g_weight_var.get())))
         b_w = max(0.5, min(2.0, float(self.rgb_b_weight_var.get())))
+        if self.normal_enabled_var.get() and not self.normal_map_path:
+            messagebox.showerror("入力エラー", "ノーマルマップを選択してください。")
+            return None
+        if self.ao_enabled_var.get() and not self.ao_map_path:
+            messagebox.showerror("入力エラー", "AOマップを選択してください。")
+            return None
+        if self.specular_enabled_var.get() and not self.specular_map_path:
+            messagebox.showerror("入力エラー", "Specularマップを選択してください。")
+            return None
+        if self.displacement_enabled_var.get() and not self.displacement_map_path:
+            messagebox.showerror("入力エラー", "Displacementマップを選択してください。")
+            return None
+        spec_strength = max(0.0, min(2.0, float(self.specular_strength_var.get())))
+        spec_shininess = max(1.0, min(64.0, float(self.specular_shininess_var.get())))
         return ConversionRequest(
             width=width,
             height=height,
@@ -261,6 +459,29 @@ class ActionsMixin:
             keep_aspect=keep_aspect,
             resize_method=resize_method,
             rgb_weights=(r_w, g_w, b_w),
+            normal_map_path=str(self.normal_map_path) if self.normal_map_path else None,
+            normal_enabled=bool(self.normal_enabled_var.get()),
+            normal_invert_y=bool(self.normal_invert_y_var.get()),
+            normal_light_dir=(
+                float(self.normal_light_x_var.get()),
+                float(self.normal_light_y_var.get()),
+                float(self.normal_light_z_var.get()),
+            ),
+            normal_strength=float(self.normal_strength_var.get()),
+            normal_ambient=float(self.normal_ambient_var.get()),
+            normal_gamma=float(self.normal_gamma_var.get()),
+            ao_map_path=str(self.ao_map_path) if self.ao_map_path else None,
+            ao_enabled=bool(self.ao_enabled_var.get()),
+            ao_strength=float(self.ao_strength_var.get()),
+            specular_map_path=str(self.specular_map_path) if self.specular_map_path else None,
+            specular_enabled=bool(self.specular_enabled_var.get()),
+            specular_strength=spec_strength,
+            specular_shininess=spec_shininess,
+            displacement_map_path=str(self.displacement_map_path) if self.displacement_map_path else None,
+            displacement_enabled=bool(self.displacement_enabled_var.get()),
+            displacement_strength=float(self.displacement_strength_var.get()),
+            displacement_midpoint=float(self.displacement_midpoint_var.get()),
+            displacement_invert=bool(self.displacement_invert_var.get()),
         )
 
     def _build_pending_settings(self: "BeadsApp", request: ConversionRequest) -> dict:
@@ -290,12 +511,36 @@ class ActionsMixin:
             "CMC c": cmc_c,
             "リサイズ方式": resize_label,
             "RGB重み": rgb_weights,
+            "ノーマル有効": bool(request.normal_enabled),
+            "ノーマルY反転": bool(request.normal_invert_y),
+            "ノーマル強さ": round(float(request.normal_strength), 3),
+            "ノーマル環境光": round(float(request.normal_ambient), 3),
+            "ノーマルガンマ": round(float(request.normal_gamma), 3),
+            "ノーマル光方向": [
+                round(float(request.normal_light_dir[0]), 3),
+                round(float(request.normal_light_dir[1]), 3),
+                round(float(request.normal_light_dir[2]), 3),
+            ],
+            "ノーマルマップ": request.normal_map_path,
+            "AO有効": bool(request.ao_enabled),
+            "AO強さ": round(float(request.ao_strength), 3),
+            "AOマップ": request.ao_map_path,
+            "Specular有効": bool(request.specular_enabled),
+            "Specular強さ": round(float(request.specular_strength), 3),
+            "Specular鋭さ": round(float(request.specular_shininess), 3),
+            "Specularマップ": request.specular_map_path,
+            "Displacement有効": bool(request.displacement_enabled),
+            "Displacement強さ": round(float(request.displacement_strength), 3),
+            "Displacement中心": round(float(request.displacement_midpoint), 3),
+            "Displacement反転": bool(request.displacement_invert),
+            "Displacementマップ": request.displacement_map_path,
         }
 
     def _prepare_conversion_ui(self: "BeadsApp") -> None:
         self.save_button.configure(state="disabled")
         self._set_color_usage_button_state(False)
         self._start_time = time.perf_counter()
+        self._set_progress_style(self._progress_style_default)
         self.update_progress(0.0)
         self.status_var.set("変換中...")
         self.convert_button.configure(text="変換中止", state="normal", command=self.cancel_conversion)
@@ -310,6 +555,30 @@ class ActionsMixin:
             btn.configure(state=state_token)
         except Exception:
             pass
+
+    def _set_3d_preview_button_state(self: "BeadsApp", enabled: bool) -> None:
+        """3Dプレビューの有効/無効を切り替える。"""
+        btn = getattr(self, "preview_3d_button", None)
+        if not btn:
+            return
+        state_token = "normal" if enabled else "disabled"
+        try:
+            btn.configure(state=state_token)
+        except Exception:
+            pass
+
+    def _get_3d_preview_source(self: "BeadsApp") -> Optional[np.ndarray]:
+        """3Dプレビューに使える画像を取得する。"""
+        if self.output_image is not None:
+            return self.output_image
+        base = getattr(self, "_color_usage_base_image", None)
+        if isinstance(base, np.ndarray):
+            return base
+        return None
+
+    def _update_3d_preview_button_state(self: "BeadsApp") -> None:
+        """3Dプレビューの可否を最新状態に合わせる。"""
+        self._set_3d_preview_button_state(self._get_3d_preview_source() is not None)
 
     def _build_color_usage_rows(self: "BeadsApp", image: np.ndarray, settings: Optional[dict]) -> list[dict]:
         """変換後画像から色使用数の一覧を作る。"""
@@ -369,11 +638,13 @@ class ActionsMixin:
             self._color_usage_base_image = None
             self._set_color_usage_button_state(False)
             self._refresh_color_usage_window(reset_sort=False)
+            self._update_3d_preview_button_state()
             return False
         self.color_usage = rows
         self._color_usage_base_image = input_array
         self._set_color_usage_button_state(bool(rows))
         self._refresh_color_usage_window(reset_sort=True)
+        self._update_3d_preview_button_state()
         return True
 
     def _refresh_color_usage_window(self: "BeadsApp", reset_sort: bool) -> None:
@@ -473,6 +744,66 @@ class ActionsMixin:
         )
         self._update_color_usage_preview(None)
 
+    def _check_3d_preview_available(self: "BeadsApp") -> bool:
+        """3Dプレビューの依存関係があるか確認する。"""
+        try:
+            import OpenGL.GL  # noqa: F401
+            import OpenGL.GLU  # noqa: F401
+            from pyopengltk import OpenGLFrame  # noqa: F401
+        except Exception as exc:
+            messagebox.showerror(
+                "3Dプレビュー未対応",
+                "3Dプレビューを使うには以下をインストールしてください。\n"
+                "pip install PyOpenGL pyopengltk\n\n"
+                f"詳細: {exc}",
+            )
+            return False
+        return True
+
+    def _on_3d_preview_closed(self: "BeadsApp") -> None:
+        """3Dプレビューの参照をクリアする。"""
+        self._preview_3d_window = None
+
+    def _update_3d_preview(self: "BeadsApp", image: np.ndarray) -> None:
+        """3Dプレビューに最新の画像を渡す。"""
+        window = getattr(self, "_preview_3d_window", None)
+        if window is None:
+            return
+        try:
+            if not window.winfo_exists():
+                return
+        except Exception:
+            return
+        try:
+            window.set_image(image)
+        except Exception:
+            pass
+
+    def open_3d_preview(self: "BeadsApp") -> None:
+        """3Dプレビュー（試作）を開く。"""
+        if not self._check_3d_preview_available():
+            return
+        source = self._get_3d_preview_source()
+        if source is None:
+            messagebox.showinfo("3Dプレビュー", "プレビューできる画像がありません。")
+            return
+        window = getattr(self, "_preview_3d_window", None)
+        try:
+            if window is not None and window.winfo_exists():
+                self._update_3d_preview(source)
+                window.focus()
+                return
+        except Exception:
+            pass
+        try:
+            from .preview_3d import BeadsPreview3DWindow
+        except Exception as exc:
+            messagebox.showerror("3Dプレビュー未対応", f"3Dプレビューの読み込みに失敗しました:\n{exc}")
+            return
+        self._preview_3d_window = BeadsPreview3DWindow(self.root, on_close=self._on_3d_preview_closed)
+        self._preview_3d_window.focus()
+        self._update_3d_preview(source)
+
     def cancel_conversion(self: "BeadsApp") -> None:
         self._runner.cancel()
         self.status_var.set("中止要求を送信しました...")
@@ -487,10 +818,29 @@ class ActionsMixin:
         self.output_path = None
         self.prev_settings = self.last_settings
         self._showing_prev = False
+        # 表示準備の中で細かく進捗を動かす
+        def _set_ui_fraction(value: float) -> None:
+            self._set_ui_progress_fraction(value)
+            self.root.update_idletasks()
+
+        def _set_ui_phase(phase: str, value: float) -> None:
+            clamped = max(0.0, min(1.0, value))
+            if phase == "create":
+                start, end = 0.35, 0.55
+            elif phase == "resize":
+                start, end = 0.55, 0.85
+            elif phase == "draw":
+                start, end = 0.85, 1.0
+            else:
+                start, end = 0.35, 1.0
+            self._set_ui_progress_fraction(start + (end - start) * clamped)
+            self.root.update_idletasks()
+
         if isinstance(result, list):
             self.prev_output_pil = None
             all_results: list[dict] = []
-            for entry in result:
+            total = max(1, len(result))
+            for idx, entry in enumerate(result):
                 if not isinstance(entry, dict):
                     continue
                 image = entry.get("image")
@@ -500,6 +850,7 @@ class ActionsMixin:
                 all_results.append(
                     {"label": label, "image": image, "pil": Image.fromarray(image)}
                 )
+                _set_ui_phase("create", (idx + 1) / total)
             self._all_mode_results = all_results if all_results else None
             self._output_grid_photos = []
             self.output_image = self._compose_all_mode_image(all_results)
@@ -518,12 +869,20 @@ class ActionsMixin:
             self.color_usage = self._build_color_usage_rows(result, self._pending_settings)
             self._set_color_usage_button_state(bool(self.color_usage))
             self._refresh_color_usage_window(reset_sort=True)
+            _set_ui_phase("create", 1.0)
+        _set_ui_fraction(0.25)
         self.last_settings = self._pending_settings
         self._pending_settings = None
         self.diff_var.set(self._build_diff_overlay())
         self._save_settings()
-        self._refresh_previews()
-        self.update_progress(1.0)
+        _set_ui_fraction(0.35)
+        self._refresh_previews(progress_cb=_set_ui_phase)
+        if self.output_image is not None:
+            self._update_3d_preview(self.output_image)
+        # 変換結果の有無で3Dプレビューのボタンを切り替える
+        self._update_3d_preview_button_state()
+        _set_ui_phase("draw", 1.0)
+        self._set_progress_value(1.0)
         self._restore_convert_button()
         self.save_button.configure(state="normal" if self.output_image is not None else "disabled")
         self.status_var.set("変換完了（保存ボタンで任意の場所に保存できます）")
@@ -574,13 +933,38 @@ class ActionsMixin:
         self.progress_bar["value"] = 0
 
     def update_progress(self: "BeadsApp", value: float) -> None:
+        self._set_progress_style(self._progress_style_default)
         clamped = max(0.0, min(1.0, value))
-        percent = int(clamped * 100)
+        self._conversion_progress_last = clamped
+        start, end = getattr(self, "_conversion_progress_range", (0.0, 1.0))
+        mapped = start + (end - start) * clamped
+        self._set_progress_value(mapped)
+
+    def _set_progress_value(self: "BeadsApp", value: float) -> None:
+        """進捗表示を実数(0.0-1.0)で更新する。"""
+        clamped = max(0.0, min(1.0, value))
+        percent = int(round(clamped * 100))
         elapsed = 0.0
         if self._start_time is not None:
             elapsed = time.perf_counter() - self._start_time
         self.progress_label.configure(text=f"進捗: {percent}% (経過 {elapsed:.1f}s)")
         self.progress_bar["value"] = percent
+
+    def _set_ui_progress_fraction(self: "BeadsApp", fraction: float) -> None:
+        """UI側の進捗を0.0-1.0で受け取り、全体の進捗へ反映する。"""
+        start, end = getattr(self, "_ui_progress_range", (0.0, 1.0))
+        clamped = max(0.0, min(1.0, fraction))
+        mapped = start + (end - start) * clamped
+        self._set_progress_value(mapped)
+
+    def _update_ui_progress(self: "BeadsApp", step: int, total: int) -> None:
+        """表示準備側の進捗を段階的に進める。"""
+        if total <= 0:
+            return
+        start, end = getattr(self, "_ui_progress_range", (0.0, 1.0))
+        fraction = max(0.0, min(1.0, step / total))
+        mapped = start + (end - start) * fraction
+        self._set_progress_value(mapped)
 
     def _reset_after_stop(
         self: "BeadsApp",
@@ -589,6 +973,7 @@ class ActionsMixin:
         preserve_output: bool = False,
     ) -> None:
         self._start_time = None
+        self._conversion_progress_last = 0.0
         if not preserve_output:
             self.output_image = None
             self.output_pil = None
@@ -608,6 +993,7 @@ class ActionsMixin:
             self.save_button.configure(state="normal" if self.output_image is not None else "disabled")
         else:
             self.save_button.configure(state="disabled")
+        self._update_3d_preview_button_state()
         self._set_color_usage_button_state(bool(self.color_usage and self._color_usage_base_image is not None))
         self._refresh_color_usage_window(reset_sort=False)
         if clear_canvas and not preserve_output:
