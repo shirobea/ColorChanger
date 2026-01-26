@@ -1,0 +1,1 @@
+{"width": 2560, "height": 1369, "x": -8, "y": -1448, "state": "zoomed"}
